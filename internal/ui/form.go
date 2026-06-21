@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"log"
 	"strconv"
 
 	"fyne.io/fyne/v2"
@@ -12,7 +13,6 @@ import (
 	"github.com/n1lordduck/syncpad/internal/config"
 	sftperrors "github.com/n1lordduck/syncpad/internal/errors"
 	sftpclient "github.com/n1lordduck/syncpad/internal/sftp"
-	"log"
 )
 
 func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*config.Container)) {
@@ -53,7 +53,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	})
 
 	hostEntry := widget.NewEntry()
-	hostEntry.SetPlaceHolder("sftp.provedor.com")
+	hostEntry.SetPlaceHolder("sftp.provider.com")
 	hostEntry.SetText(c.SFTP.Host)
 
 	portEntry := widget.NewEntry()
@@ -88,8 +88,8 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	})
 	keyBrowseBtn.Disable()
 
-	authSelect := widget.NewSelect([]string{"Senha", "Chave privada"}, func(val string) {
-		if val == "Senha" {
+	authSelect := widget.NewSelect([]string{"Password", "Private key"}, func(val string) {
+		if val == "Password" {
 			passEntry.Enable()
 			keyPathEntry.Disable()
 			keyBrowseBtn.Disable()
@@ -100,46 +100,46 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		}
 	})
 	if c.SFTP.Auth == config.AuthKey {
-		authSelect.SetSelected("Chave privada")
+		authSelect.SetSelected("Private key")
 	} else {
-		authSelect.SetSelected("Senha")
+		authSelect.SetSelected("Password")
 	}
 
 	remotePathEntry := widget.NewEntry()
 	remotePathEntry.SetPlaceHolder("/garrysmod/addons")
 	remotePathEntry.SetText(c.SFTP.RemotePath)
 
-	syncModeSelect := widget.NewSelect([]string{"Manual", "Automático"}, func(val string) {
-		if val == "Automático" {
+	syncModeSelect := widget.NewSelect([]string{"Manual", "Automatic"}, func(val string) {
+		if val == "Automatic" {
 			c.SyncMode = config.SyncAuto
 		} else {
 			c.SyncMode = config.SyncManual
 		}
 	})
 	if c.SyncMode == config.SyncAuto {
-		syncModeSelect.SetSelected("Automático")
+		syncModeSelect.SetSelected("Automatic")
 	} else {
 		syncModeSelect.SetSelected("Manual")
 	}
 
-	deleteSyncCheck := widget.NewCheck("Deletar arquivos remotos ao deletar localmente", func(v bool) {
+	deleteSyncCheck := widget.NewCheck("Delete remote files when deleted locally", func(v bool) {
 		c.DeleteSync = v
 	})
 	deleteSyncCheck.SetChecked(c.DeleteSync)
 
 	form := widget.NewForm(
-		widget.NewFormItem("Nome do container", nameEntry),
-		widget.NewFormItem("Pasta local", container.NewBorder(nil, nil, nil, browseBtn, localPathEntry)),
+		widget.NewFormItem("Container name", nameEntry),
+		widget.NewFormItem("Local path", container.NewBorder(nil, nil, nil, browseBtn, localPathEntry)),
 	)
 
 	sftpForm := widget.NewForm(
 		widget.NewFormItem("Host", hostEntry),
-		widget.NewFormItem("Porta", portEntry),
-		widget.NewFormItem("Usuário", userEntry),
-		widget.NewFormItem("Autenticação", authSelect),
-		widget.NewFormItem("Senha", passEntry),
-		widget.NewFormItem("Chave privada", container.NewBorder(nil, nil, nil, keyBrowseBtn, keyPathEntry)),
-		widget.NewFormItem("Caminho remoto", remotePathEntry),
+		widget.NewFormItem("Port", portEntry),
+		widget.NewFormItem("Username", userEntry),
+		widget.NewFormItem("Authentication", authSelect),
+		widget.NewFormItem("Password", passEntry),
+		widget.NewFormItem("Private key", container.NewBorder(nil, nil, nil, keyBrowseBtn, keyPathEntry)),
+		widget.NewFormItem("Remote path", remotePathEntry),
 	)
 
 	testBtn := widget.NewButtonWithIcon("Test connection", theme.MediaPlayIcon(), func() {
@@ -160,8 +160,8 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			KeyPath:    keyPathEntry.Text,
 			RemotePath: remotePathEntry.Text,
 		}
-		testBtn := widget.NewLabel("Connecting...")
-		d := dialog.NewCustom("Test connection", "Close", testBtn, w)
+		statusLabel := widget.NewLabel("Connecting...")
+		d := dialog.NewCustom("Test connection", "Close", statusLabel, w)
 		d.Show()
 		go func() {
 			client, err := sftpclient.Connect(cfg)
@@ -169,11 +169,11 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 				friendlyMsg := sftperrors.Parse(err)
 
 				log.Printf("SFTP Connection failed: %v", err)
-				testBtn.SetText(friendlyMsg.Error())
+				statusLabel.SetText(friendlyMsg.Error())
 				return
 			}
 			client.Close()
-			testBtn.SetText("✔ Connected successfully!")
+			statusLabel.SetText("✔ Connected successfully!")
 		}()
 	})
 
@@ -188,12 +188,12 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		deleteSyncCheck,
 	)
 
-	title := "Novo Container"
+	title := "New Container"
 	if existing != nil {
-		title = "Editar: " + existing.Name
+		title = "Edit: " + existing.Name
 	}
 
-	dialog.ShowCustomConfirm(title, "Salvar", "Cancelar", content, func(ok bool) {
+	dialog.ShowCustomConfirm(title, "Save", "Cancel", content, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -203,7 +203,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		}
 
 		auth := config.AuthPassword
-		if authSelect.Selected == "Chave privada" {
+		if authSelect.Selected == "Private key" {
 			auth = config.AuthKey
 		}
 
