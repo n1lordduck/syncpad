@@ -14,6 +14,14 @@ import (
 	"image/color"
 )
 
+type forcedDarkTheme struct {
+	fyne.Theme
+}
+
+func (f *forcedDarkTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	return f.Theme.Color(name, theme.VariantDark)
+}
+
 func showSplash(a fyne.App) fyne.Window {
 	splash := a.NewWindow("")
 	splash.SetFixedSize(true)
@@ -44,7 +52,7 @@ func showSplash(a fyne.App) fyne.Window {
 
 func main() {
 	a := app.NewWithID("dev.n1lordduck.syncpad")
-	a.Settings().SetTheme(theme.DarkTheme())
+	a.Settings().SetTheme(&forcedDarkTheme{Theme: theme.DefaultTheme()})
 
 	splash := showSplash(a)
 
@@ -58,19 +66,19 @@ func main() {
 
 	// System tray — descomentar quando tiver ícone definido
 	// if desk, ok := a.(desktop.App); ok {
-	// 	m := fyne.NewMenu("SyncPad",
-	// 		fyne.NewMenuItem("Abrir", func() {
-	// 			mainWin.Show()
-	// 		}),
-	// 		fyne.NewMenuItemSeparator(),
-	// 		fyne.NewMenuItem("Sair", func() {
-	// 			a.Quit()
-	// 		}),
-	// 	)
-	// 	desk.SetSystemTrayMenu(m)
-	// 	mainWin.SetCloseIntercept(func() {
-	// 		mainWin.Hide()
-	// 	})
+	//     m := fyne.NewMenu("SyncPad",
+	//         fyne.NewMenuItem("Abrir", func() {
+	//             mainWin.Show()
+	//         }),
+	//         fyne.NewMenuItemSeparator(),
+	//         fyne.NewMenuItem("Sair", func() {
+	//             a.Quit()
+	//         }),
+	//     )
+	//     desk.SetSystemTrayMenu(m)
+	//     mainWin.SetCloseIntercept(func() {
+	//         mainWin.Hide()
+	//     })
 	// }
 
 	go func() {
