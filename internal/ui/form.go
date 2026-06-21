@@ -10,7 +10,9 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/n1lordduck/syncpad/internal/config"
+	sftperrors "github.com/n1lordduck/syncpad/internal/errors"
 	sftpclient "github.com/n1lordduck/syncpad/internal/sftp"
+	"log"
 )
 
 func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*config.Container)) {
@@ -164,7 +166,10 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		go func() {
 			client, err := sftpclient.Connect(cfg)
 			if err != nil {
-				testBtn.SetText("❌ " + err.Error())
+				friendlyMsg := sftperrors.Parse(err)
+
+				log.Printf("SFTP Connection failed: %v", err)
+				testBtn.SetText(friendlyMsg.Error())
 				return
 			}
 			client.Close()
