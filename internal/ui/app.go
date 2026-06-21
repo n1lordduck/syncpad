@@ -63,7 +63,7 @@ func (app *App) BuildWindow() fyne.Window {
 	addBtn := widget.NewButtonWithIcon("New container", theme.ContentAddIcon(), func() {
 		ShowContainerForm(app.win, nil, func(c *config.Container) {
 			app.store.Add(c)
-			app.store.Save()
+			_ = app.store.Save()
 			app.sidebar.Refresh()
 		})
 	})
@@ -160,7 +160,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		ShowContainerForm(app.win, app.selected, func(updated *config.Container) {
 			updated.ID = app.selected.ID
 			app.store.Update(updated)
-			app.store.Save()
+			_ = app.store.Save()
 			app.selected = updated
 			pathLabel.SetText("Local: " + updated.LocalPath)
 			hostLabel.SetText(fmt.Sprintf("SFTP: %s:%d → %s", updated.SFTP.Host, updated.SFTP.Port, updated.SFTP.RemotePath))
@@ -185,7 +185,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			}
 			app.mu.Unlock()
 			app.store.Remove(c.ID)
-			app.store.Save()
+			_ = app.store.Save()
 			app.selected = nil
 			app.sidebar.Refresh()
 		}, app.win)
@@ -259,7 +259,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		app.mu.Lock()
 		delete(app.sessions, c.ID)
 		app.mu.Unlock()
-		app.appendLog("⏹ " + c.Name + " parado.")
+		app.appendLog("⏹ " + c.Name + " stopped.")
 		watchBtn.SetText("Watch")
 		watchBtn.SetIcon(theme.MediaPlayIcon())
 		sendBtn.Disable()
@@ -278,7 +278,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 	app.sessions[c.ID] = sess
 	app.mu.Unlock()
 
-	app.appendLog("▶ " + c.Name + " monitorando.")
+	app.appendLog("▶ " + c.Name + " monitoring.")
 	watchBtn.SetText("Stop")
 	watchBtn.SetIcon(theme.MediaStopIcon())
 
