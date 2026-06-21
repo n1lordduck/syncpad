@@ -78,7 +78,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 					return
 				}
 				keyPathEntry.SetText(f.URI().Path())
-				f.Close()
+				_ = f.Close()
 			}, w)
 			d.SetFilter(storage.NewExtensionFileFilter([]string{".pem", ".ppk", ""}))
 			d.Show()
