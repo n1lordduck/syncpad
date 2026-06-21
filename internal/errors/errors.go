@@ -6,9 +6,9 @@ import (
 )
 
 var (
-	ErrConnectionRefused = errors.New("the connection was refused. Check if the server is up and the port is correct.")
-	ErrAuthentication    = errors.New("authentication failed. Please check your username, password, or private key.")
-	ErrTimeout           = errors.New("the connection timed out. The server might be unreachable.")
+	ErrConnectionRefused = errors.New("the connection was refused, check if the server is up and the port is correct")
+	ErrAuthentication    = errors.New("authentication failed, please check your username, password, or private key")
+	ErrTimeout           = errors.New("the connection timed out, the server might be unreachable")
 )
 
 func Parse(err error) error {
