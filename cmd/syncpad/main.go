@@ -28,7 +28,7 @@ func showSplash(a fyne.App) fyne.Window {
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
 
-	sub := canvas.NewText("carregando...", color.NRGBA{R: 140, G: 140, B: 160, A: 255})
+	sub := canvas.NewText("loading...", color.NRGBA{R: 140, G: 140, B: 160, A: 255})
 	sub.TextSize = 13
 	sub.Alignment = fyne.TextAlignCenter
 

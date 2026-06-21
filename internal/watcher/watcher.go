@@ -67,7 +67,7 @@ func (s *Session) Flush() {
 
 	client, err := sftpclient.Connect(s.Container.SFTP)
 	if err != nil {
-		s.emit("ERRO conexão SFTP: "+err.Error(), true)
+		s.emit("SFTP connection error: "+err.Error(), true)
 		return
 	}
 	defer client.Close()
@@ -78,13 +78,13 @@ func (s *Session) Flush() {
 		switch pf.Kind {
 		case KindUpsert:
 			if err := client.Upload(pf.LocalPath, remote); err != nil {
-				s.emit("ERRO upload "+filepath.Base(pf.LocalPath)+": "+err.Error(), true)
+				s.emit("upload error "+filepath.Base(pf.LocalPath)+": "+err.Error(), true)
 				continue
 			}
 			s.emit("↑ "+filepath.Base(pf.LocalPath), false)
 		case KindDelete:
 			if err := client.Delete(remote); err != nil {
-				s.emit("ERRO delete "+filepath.Base(pf.LocalPath)+": "+err.Error(), true)
+				s.emit("delete error "+filepath.Base(pf.LocalPath)+": "+err.Error(), true)
 				continue
 			}
 			s.emit("✕ "+filepath.Base(pf.LocalPath), false)
@@ -95,7 +95,7 @@ func (s *Session) Flush() {
 		s.mu.Unlock()
 	}
 	if ok > 0 {
-		s.emit(fmt.Sprintf("✔ %d arquivo(s) enviado(s).", ok), false)
+		s.emit(fmt.Sprintf("✔ %d file(s) sent.", ok), false)
 	}
 }
 
@@ -111,7 +111,7 @@ func (s *Session) Start() error {
 	}
 
 	mode := s.Container.SyncMode
-	s.emit("Monitorando "+s.Container.LocalPath+" (modo: "+string(mode)+")", false)
+	s.emit("Watching "+s.Container.LocalPath+" (modo: "+string(mode)+")", false)
 
 	go func() {
 		defer w.Close()
@@ -122,7 +122,7 @@ func (s *Session) Start() error {
 		for {
 			select {
 			case <-s.stop:
-				s.emit("Watcher parado.", false)
+				s.emit("Watcher stopped.", false)
 				return
 
 			case ev, ok := <-w.Events:
@@ -171,7 +171,7 @@ func (s *Session) queue(localPath string, kind EventKind) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending[localPath] = PendingFile{LocalPath: localPath, Kind: kind}
-	s.emit(fmt.Sprintf("~ %s pendente (%d total)", filepath.Base(localPath), len(s.pending)), false)
+	s.emit(fmt.Sprintf("~ %s pending (%d total)", filepath.Base(localPath), len(s.pending)), false)
 }
 
 func (s *Session) Stop() {

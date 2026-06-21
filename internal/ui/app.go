@@ -55,12 +55,12 @@ func (app *App) BuildWindow() fyne.Window {
 
 	rightPanel := container.NewBorder(
 		nil,
-		container.NewVBox(widget.NewSeparator(), widget.NewLabel("Log de eventos"), app.logScroll),
+		container.NewVBox(widget.NewSeparator(), widget.NewLabel("Event log"), app.logScroll),
 		nil, nil,
 		app.buildDetailPanel(),
 	)
 
-	addBtn := widget.NewButtonWithIcon("Novo container", theme.ContentAddIcon(), func() {
+	addBtn := widget.NewButtonWithIcon("New container", theme.ContentAddIcon(), func() {
 		ShowContainerForm(app.win, nil, func(c *config.Container) {
 			app.store.Add(c)
 			app.store.Save()
@@ -120,7 +120,7 @@ func (app *App) buildSidebar() *widget.List {
 }
 
 func (app *App) buildDetailPanel() fyne.CanvasObject {
-	nameLabel := widget.NewLabelWithStyle("Selecione um container", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	nameLabel := widget.NewLabelWithStyle("Select a container", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	pathLabel := widget.NewLabel("")
 	hostLabel := widget.NewLabel("")
 	modeLabel := widget.NewLabel("")
@@ -128,14 +128,14 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 	app.pendingLabel = widget.NewLabel("")
 	app.pendingLabel.Hide()
 
-	app.watchBtn = widget.NewButtonWithIcon("Monitorar", theme.MediaPlayIcon(), func() {
+	app.watchBtn = widget.NewButtonWithIcon("Watch", theme.MediaPlayIcon(), func() {
 		if app.selected == nil {
 			return
 		}
 		app.toggleWatch(app.selected, app.watchBtn, app.sendBtn, app.pendingLabel)
 	})
 
-	app.sendBtn = widget.NewButtonWithIcon("Enviar updates", theme.MailSendIcon(), func() {
+	app.sendBtn = widget.NewButtonWithIcon("Send updates", theme.MailSendIcon(), func() {
 		if app.selected == nil {
 			return
 		}
@@ -153,7 +153,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 	app.sendBtn.Importance = widget.HighImportance
 	app.sendBtn.Disable()
 
-	editBtn := widget.NewButtonWithIcon("Editar", theme.SettingsIcon(), func() {
+	editBtn := widget.NewButtonWithIcon("Edit", theme.SettingsIcon(), func() {
 		if app.selected == nil {
 			return
 		}
@@ -164,17 +164,17 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			app.selected = updated
 			pathLabel.SetText("Local: " + updated.LocalPath)
 			hostLabel.SetText(fmt.Sprintf("SFTP: %s:%d → %s", updated.SFTP.Host, updated.SFTP.Port, updated.SFTP.RemotePath))
-			modeLabel.SetText("Modo: " + string(updated.SyncMode))
+			modeLabel.SetText("Mode: " + string(updated.SyncMode))
 			app.sidebar.Refresh()
 		})
 	})
 
-	deleteBtn := widget.NewButtonWithIcon("Remover", theme.DeleteIcon(), func() {
+	deleteBtn := widget.NewButtonWithIcon("Remove", theme.DeleteIcon(), func() {
 		if app.selected == nil {
 			return
 		}
 		c := app.selected
-		dialog.ShowConfirm("Remover container", "Remover '"+c.Name+"'?", func(ok bool) {
+		dialog.ShowConfirm("Remove container", "Remover '"+c.Name+"'?", func(ok bool) {
 			if !ok {
 				return
 			}
@@ -208,20 +208,20 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		if mode == "" {
 			mode = config.SyncManual
 		}
-		modeLabel.SetText("Modo: " + string(mode))
+		modeLabel.SetText("Mode: " + string(mode))
 
 		app.mu.Lock()
 		sess, active := app.sessions[c.ID]
 		app.mu.Unlock()
 
 		if active {
-			app.watchBtn.SetText("Parar")
+			app.watchBtn.SetText("Stop")
 			app.watchBtn.SetIcon(theme.MediaStopIcon())
 			if c.SyncMode == config.SyncManual {
 				app.sendBtn.Enable()
 				n := sess.PendingCount()
 				if n > 0 {
-					app.pendingLabel.SetText(fmt.Sprintf("%d arquivo(s) pendente(s)", n))
+					app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
 					app.pendingLabel.Show()
 				} else {
 					app.pendingLabel.Hide()
@@ -231,7 +231,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 				app.pendingLabel.Hide()
 			}
 		} else {
-			app.watchBtn.SetText("Monitorar")
+			app.watchBtn.SetText("Watch")
 			app.watchBtn.SetIcon(theme.MediaPlayIcon())
 			app.sendBtn.Disable()
 			app.pendingLabel.Hide()
@@ -260,7 +260,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		delete(app.sessions, c.ID)
 		app.mu.Unlock()
 		app.appendLog("⏹ " + c.Name + " parado.")
-		watchBtn.SetText("Monitorar")
+		watchBtn.SetText("Watch")
 		watchBtn.SetIcon(theme.MediaPlayIcon())
 		sendBtn.Disable()
 		pendingLabel.Hide()
@@ -279,7 +279,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 	app.mu.Unlock()
 
 	app.appendLog("▶ " + c.Name + " monitorando.")
-	watchBtn.SetText("Parar")
+	watchBtn.SetText("Stop")
 	watchBtn.SetIcon(theme.MediaStopIcon())
 
 	if c.SyncMode == config.SyncManual || c.SyncMode == "" {
@@ -316,7 +316,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 func (app *App) refreshPending(sess *watcher.Session) {
 	n := sess.PendingCount()
 	if n > 0 {
-		app.pendingLabel.SetText(fmt.Sprintf("%d arquivo(s) pendente(s)", n))
+		app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
 		app.pendingLabel.Show()
 	} else {
 		app.pendingLabel.Hide()
