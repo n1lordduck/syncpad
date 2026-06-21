@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ func Connect(cfg config.SFTPConfig) (*Client, error) {
 		Timeout:         15 * time.Second,
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
@@ -41,14 +42,14 @@ func Connect(cfg config.SFTPConfig) (*Client, error) {
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, sshCfg)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake: %w", err)
 	}
 
 	sshClient := ssh.NewClient(sshConn, chans, reqs)
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
-		sshClient.Close()
+		_ = sshClient.Close()
 		return nil, fmt.Errorf("sftp session: %w", err)
 	}
 
@@ -82,13 +83,13 @@ func (c *Client) Upload(localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("open local: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	dst, err := c.sftp.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("open remote %s: %w", remotePath, err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	_, err = io.Copy(dst, src)
 	return err
@@ -116,14 +117,14 @@ func (c *Client) mkdirAll(path string) error {
 			continue
 		}
 		cur = cur + p + "/"
-		c.sftp.Mkdir(cur)
+		_ = c.sftp.Mkdir(cur)
 	}
 	return nil
 }
 
 func (c *Client) Close() {
-	c.sftp.Close()
-	c.ssh.Close()
+	_ = c.sftp.Close()
+	_ = c.ssh.Close()
 }
 
 func isNotExist(err error) bool {
