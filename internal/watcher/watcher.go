@@ -106,15 +106,15 @@ func (s *Session) Start() error {
 	}
 
 	if err := addDirsRecursive(w, s.Container.LocalPath); err != nil {
-		w.Close()
+		_ = w.Close()
 		return fmt.Errorf("watch path: %w", err)
 	}
 
 	mode := s.Container.SyncMode
-	s.emit("Watching "+s.Container.LocalPath+" (modo: "+string(mode)+")", false)
+	s.emit("Watching "+s.Container.LocalPath+" (mode: "+string(mode)+")", false)
 
 	go func() {
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 
 		debounce := make(map[string]*time.Timer)
 		var dmu sync.Mutex
