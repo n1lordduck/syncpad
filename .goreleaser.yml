@@ -6,7 +6,7 @@ before:
 
 builds:
   - id: syncpad
-    main: ./cmd/syncpad
+    main: ./cmd/syncpad/main.go
     binary: syncpad
     env:
       - CGO_ENABLED=1
