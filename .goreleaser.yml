@@ -14,9 +14,11 @@ builds:
       - linux
     goarch:
       - amd64
+    flags:
+      - -trimpath
     ldflags:
-      - -s -w -trimpath
-
+      - -s -w
+      
 archives:
   - id: syncpad
     formats:
