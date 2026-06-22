@@ -3,7 +3,6 @@ package watcher
 import (
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +32,11 @@ type Event struct {
 	Err     bool
 }
 
+type debounceEntry struct {
+	timer *time.Timer
+	op    fsnotify.Op
+}
+
 type Session struct {
 	Container *config.Container
 	Events    chan Event
@@ -47,7 +51,7 @@ type Session struct {
 func NewSession(c *config.Container) *Session {
 	return &Session{
 		Container: c,
-		Events:    make(chan Event, 64),
+		Events:    make(chan Event, 128),
 		pending:   make(map[string]PendingFile),
 		stop:      make(chan struct{}),
 	}
@@ -68,8 +72,7 @@ func (s *Session) resolveRemotePath(localFilePath string) (string, bool) {
 		if err != nil {
 			continue
 		}
-		remoteTarget := filepath.Join(s.Container.SFTP.RemotePath, folder.Name, rel)
-		return filepath.ToSlash(remoteTarget), true
+		return filepath.ToSlash(filepath.Join(s.Container.SFTP.RemotePath, folder.Name, rel)), true
 	}
 	return "", false
 }
@@ -103,7 +106,6 @@ func (s *Session) Flush() {
 
 		var opErr error
 		var opMsg string
-
 		if pf.Kind == KindUpsert {
 			opErr = client.Upload(pf.LocalPath, remote)
 			opMsg = "↑ " + filepath.Base(pf.LocalPath)
@@ -119,7 +121,6 @@ func (s *Session) Flush() {
 
 		s.emit(opMsg, false)
 		ok++
-
 		s.mu.Lock()
 		delete(s.pending, pf.LocalPath)
 		s.mu.Unlock()
@@ -148,18 +149,15 @@ func (s *Session) Start() error {
 		s.emit("Watching folder: "+folder.LocalPath, false)
 	}
 
-	mode := s.Container.SyncMode
-	s.emit("Session started (mode: "+string(mode)+")", false)
-
-	go s.loop(w, mode)
-
+	s.emit("Session started (mode: "+string(s.Container.SyncMode)+")", false)
+	go s.loop(w)
 	return nil
 }
 
-func (s *Session) loop(w *fsnotify.Watcher, mode config.SyncMode) {
+func (s *Session) loop(w *fsnotify.Watcher) {
 	defer w.Close()
 
-	debounce := make(map[string]*time.Timer)
+	debounce := make(map[string]debounceEntry)
 	var dmu sync.Mutex
 
 	for {
@@ -172,19 +170,18 @@ func (s *Session) loop(w *fsnotify.Watcher, mode config.SyncMode) {
 			if !ok {
 				return
 			}
-			log.Println("watcher error:", err)
 			s.emit("Watcher error: "+err.Error(), true)
 
 		case ev, ok := <-w.Events:
 			if !ok {
 				return
 			}
-			s.handleEvent(w, ev, mode, debounce, &dmu)
+			s.handleEvent(w, ev, debounce, &dmu)
 		}
 	}
 }
 
-func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, mode config.SyncMode, debounce map[string]*time.Timer, dmu *sync.Mutex) {
+func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce map[string]debounceEntry, dmu *sync.Mutex) {
 	path := ev.Name
 	op := ev.Op
 
@@ -200,29 +197,33 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, mode confi
 	}
 
 	dmu.Lock()
-	if t, exists := debounce[path]; exists {
-		t.Stop()
+	entry := debounce[path]
+	if entry.timer != nil {
+		entry.timer.Stop()
 	}
-	debounce[path] = time.AfterFunc(300*time.Millisecond, func() {
-		dmu.Lock()
-		delete(debounce, path)
-		dmu.Unlock()
-
-		s.processEvent(path, op, mode)
-	})
+	accumulated := entry.op | op
+	entry = debounceEntry{
+		op: accumulated,
+		timer: time.AfterFunc(150*time.Millisecond, func() {
+			dmu.Lock()
+			finalOp := debounce[path].op
+			delete(debounce, path)
+			dmu.Unlock()
+			s.processEvent(path, finalOp)
+		}),
+	}
+	debounce[path] = entry
 	dmu.Unlock()
 }
 
-func (s *Session) processEvent(path string, op fsnotify.Op, mode config.SyncMode) {
+func (s *Session) processEvent(path string, op fsnotify.Op) {
 	if op&(fsnotify.Create|fsnotify.Write) != 0 {
 		s.queue(path, KindUpsert)
-	}
-
-	if op&fsnotify.Remove != 0 && s.Container.DeleteSync {
+	} else if op&fsnotify.Remove != 0 && s.Container.DeleteSync {
 		s.queue(path, KindDelete)
 	}
 
-	if mode == config.SyncAuto {
+	if s.Container.SyncMode == config.SyncAuto {
 		s.Flush()
 	}
 }
