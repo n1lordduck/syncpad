@@ -1,37 +1,55 @@
 package sftperrors
 
 import (
-	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 )
 
 var (
-	ErrConnectionRefused = errors.New("the connection was refused, check if the server is up and the port is correct")
-	ErrAuthentication    = errors.New("authentication failed, please check your username, password, or private key")
-	ErrTimeout           = errors.New("the connection timed out, the server might be unreachable")
+	ErrConnectionRefused = fmt.Errorf("connection refused error")
+	ErrAuthentication    = fmt.Errorf("auth error")
+	ErrTimeout           = fmt.Errorf("timeout error")
 )
+
+var errorMappings = []struct {
+	pattern string
+	target  error
+}{
+	{"connection refused", ErrConnectionRefused},
+	{"unable to authenticate", ErrAuthentication},
+	{"timeout", ErrTimeout},
+}
+
+var errorRegex *regexp.Regexp
+
+func init() {
+	patterns := make([]string, len(errorMappings))
+	for i, m := range errorMappings {
+		patterns[i] = "(" + regexp.QuoteMeta(m.pattern) + ")"
+	}
+
+	combinedPattern := strings.Join(patterns, "|")
+	errorRegex = regexp.MustCompile(combinedPattern)
+}
 
 func Parse(err error) error {
 	if err == nil {
 		return nil
 	}
 
-	msg := strings.ToLower(err.Error())
+	msg := err.Error()
 
-	mappings := []struct {
-		pattern string
-		target  error
-	}{
-		{"connection refused", ErrConnectionRefused},
-		{"unable to authenticate", ErrAuthentication},
-		{"timeout", ErrTimeout},
+	indices := errorRegex.FindStringSubmatchIndex(msg)
+	if indices == nil {
+		return err
 	}
 
-	for _, m := range mappings {
-		if strings.Contains(msg, m.pattern) {
-			return m.target
+	for i := 1; i < len(indices)/2; i++ {
+		if indices[i*2] != -1 {
+			return errorMappings[i-1].target
 		}
 	}
-	// TODO: We should probably hide this and log it somewhere else
+
 	return err
 }
