@@ -33,13 +33,23 @@ const (
 	SyncAuto   SyncMode = "auto"
 )
 
+type FolderItem struct {
+	Name       string `json:"name"`
+	LocalPath  string `json:"local_path"`
+	RemotePath string `json:"remote_path"`
+}
+
+func (f FolderItem) GetRemotePath(baseRemotePath string) string {
+	return filepath.ToSlash(filepath.Join(baseRemotePath, f.Name))
+}
+
 type Container struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	LocalPath  string     `json:"local_path"`
-	SFTP       SFTPConfig `json:"sftp"`
-	DeleteSync bool       `json:"delete_sync"`
-	SyncMode   SyncMode   `json:"sync_mode"`
+	ID         string       `json:"id"`
+	Name       string       `json:"name"`
+	SFTP       SFTPConfig   `json:"sftp"`
+	Folders    []FolderItem `json:"folders"`
+	SyncMode   SyncMode     `json:"sync_mode"`
+	DeleteSync bool         `json:"delete_sync"`
 }
 
 type Store struct {
