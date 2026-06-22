@@ -56,33 +56,34 @@ func main() {
 
 	splash := showSplash(a)
 
-	store, err := config.Load()
-	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
-
-	syncApp := ui.NewApp(a, store)
-	mainWin := syncApp.BuildWindow()
-
-	// System tray — descomentar quando tiver ícone definido
-	// if desk, ok := a.(desktop.App); ok {
-	//     m := fyne.NewMenu("SyncPad",
-	//         fyne.NewMenuItem("Abrir", func() {
-	//             mainWin.Show()
-	//         }),
-	//         fyne.NewMenuItemSeparator(),
-	//         fyne.NewMenuItem("Sair", func() {
-	//             a.Quit()
-	//         }),
-	//     )
-	//     desk.SetSystemTrayMenu(m)
-	//     mainWin.SetCloseIntercept(func() {
-	//         mainWin.Hide()
-	//     })
-	// }
-
 	go func() {
+		store, err := config.Load()
+		if err != nil {
+			log.Fatalf("config: %v", err)
+		}
+
+		syncApp := ui.NewApp(a, store)
+		mainWin := syncApp.BuildWindow()
+
+		// System tray — descomentar quando tiver ícone definido
+		// if desk, ok := a.(desktop.App); ok {
+		//     m := fyne.NewMenu("SyncPad",
+		//         fyne.NewMenuItem("Abrir", func() {
+		//             mainWin.Show()
+		//         }),
+		//         fyne.NewMenuItemSeparator(),
+		//         fyne.NewMenuItem("Sair", func() {
+		//             a.Quit()
+		//         }),
+		//     )
+		//     desk.SetSystemTrayMenu(m)
+		//     mainWin.SetCloseIntercept(func() {
+		//         mainWin.Hide()
+		//     })
+		// }
+
 		time.Sleep(1200 * time.Millisecond)
+
 		splash.Close()
 		mainWin.Show()
 	}()

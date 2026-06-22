@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,14 +33,17 @@ type App struct {
 	pendingLabel *widget.Label
 	sendBtn      *widget.Button
 	watchBtn     *widget.Button
+
+	foldersScroll *container.Scroll
 }
 
 func NewApp(a fyne.App, store *config.Store) *App {
 	return &App{
-		fyne:     a,
-		store:    store,
-		sessions: make(map[string]*watcher.Session),
-		logLabel: widget.NewLabel(""),
+		fyne:          a,
+		store:         store,
+		sessions:      make(map[string]*watcher.Session),
+		logLabel:      widget.NewLabel(""),
+		foldersScroll: container.NewVScroll(container.NewVBox()),
 	}
 }
 
@@ -49,7 +53,7 @@ func (app *App) BuildWindow() fyne.Window {
 
 	app.logLabel.Wrapping = fyne.TextWrapWord
 	app.logScroll = container.NewVScroll(app.logLabel)
-	app.logScroll.SetMinSize(fyne.NewSize(0, 200))
+	app.logScroll.SetMinSize(fyne.NewSize(0, 160))
 
 	app.sidebar = app.buildSidebar()
 
@@ -102,31 +106,35 @@ func (app *App) buildSidebar() *widget.List {
 			icon := box.Objects[0].(*widget.Icon)
 			if active {
 				icon.SetResource(theme.MediaPlayIcon())
-			} else {
-				icon.SetResource(theme.FolderIcon())
+				return
 			}
+			icon.SetResource(theme.FolderIcon())
 		},
 	)
-
-	list.OnSelected = func(id widget.ListItemID) {
-		containers := app.store.All()
-		if id >= len(containers) {
-			return
-		}
-		app.selected = containers[id]
-	}
 
 	return list
 }
 
+func (app *App) renderFolders(c *config.Container) {
+	vbox := container.NewVBox()
+	for _, folder := range c.Folders {
+		lbl := widget.NewLabel(fmt.Sprintf("• [%s] %s", folder.Name, folder.LocalPath))
+		lbl.Truncation = fyne.TextTruncateEllipsis
+		vbox.Add(lbl)
+	}
+	app.foldersScroll.Content = vbox
+	app.foldersScroll.Refresh()
+}
+
 func (app *App) buildDetailPanel() fyne.CanvasObject {
 	nameLabel := widget.NewLabelWithStyle("Select a container", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	pathLabel := widget.NewLabel("")
 	hostLabel := widget.NewLabel("")
 	modeLabel := widget.NewLabel("")
 
 	app.pendingLabel = widget.NewLabel("")
 	app.pendingLabel.Hide()
+
+	app.foldersScroll.SetMinSize(fyne.NewSize(0, 260))
 
 	app.watchBtn = widget.NewButtonWithIcon("Watch", theme.MediaPlayIcon(), func() {
 		if app.selected == nil {
@@ -162,9 +170,9 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			app.store.Update(updated)
 			_ = app.store.Save()
 			app.selected = updated
-			pathLabel.SetText("Local: " + updated.LocalPath)
 			hostLabel.SetText(fmt.Sprintf("SFTP: %s:%d → %s", updated.SFTP.Host, updated.SFTP.Port, updated.SFTP.RemotePath))
 			modeLabel.SetText("Mode: " + string(updated.SyncMode))
+			app.renderFolders(updated)
 			app.sidebar.Refresh()
 		})
 	})
@@ -201,7 +209,6 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		c := app.selected
 
 		nameLabel.SetText(c.Name)
-		pathLabel.SetText("Local: " + c.LocalPath)
 		hostLabel.SetText(fmt.Sprintf("SFTP: %s:%d → %s", c.SFTP.Host, c.SFTP.Port, c.SFTP.RemotePath))
 
 		mode := c.SyncMode
@@ -209,43 +216,56 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			mode = config.SyncManual
 		}
 		modeLabel.SetText("Mode: " + string(mode))
+		app.renderFolders(c)
 
 		app.mu.Lock()
 		sess, active := app.sessions[c.ID]
 		app.mu.Unlock()
 
-		if active {
-			app.watchBtn.SetText("Stop")
-			app.watchBtn.SetIcon(theme.MediaStopIcon())
-			if c.SyncMode == config.SyncManual {
-				app.sendBtn.Enable()
-				n := sess.PendingCount()
-				if n > 0 {
-					app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
-					app.pendingLabel.Show()
-				} else {
-					app.pendingLabel.Hide()
-				}
-			} else {
-				app.sendBtn.Disable()
-				app.pendingLabel.Hide()
-			}
-		} else {
+		if !active {
 			app.watchBtn.SetText("Watch")
 			app.watchBtn.SetIcon(theme.MediaPlayIcon())
 			app.sendBtn.Disable()
 			app.pendingLabel.Hide()
+			return
 		}
+
+		app.watchBtn.SetText("Stop")
+		app.watchBtn.SetIcon(theme.MediaStopIcon())
+		if c.SyncMode != config.SyncManual {
+			app.sendBtn.Disable()
+			app.pendingLabel.Hide()
+			return
+		}
+
+		app.sendBtn.Enable()
+		n := sess.PendingCount()
+		if n > 0 {
+			app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
+			app.pendingLabel.Show()
+			return
+		}
+		app.pendingLabel.Hide()
 	}
 
-	return container.NewVBox(
+	topInfo := container.NewVBox(
 		nameLabel,
-		pathLabel,
 		hostLabel,
 		modeLabel,
 		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Mapped Folders:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+	)
+
+	bottomActions := container.NewVBox(
 		app.pendingLabel,
 		container.NewHBox(app.watchBtn, app.sendBtn, editBtn, deleteBtn),
+	)
+
+	return container.NewBorder(
+		topInfo,
+		bottomActions,
+		nil, nil,
+		app.foldersScroll,
 	)
 }
 
@@ -318,9 +338,9 @@ func (app *App) refreshPending(sess *watcher.Session) {
 	if n > 0 {
 		app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
 		app.pendingLabel.Show()
-	} else {
-		app.pendingLabel.Hide()
+		return
 	}
+	app.pendingLabel.Hide()
 }
 
 func (app *App) appendLog(line string) {
@@ -328,11 +348,11 @@ func (app *App) appendLog(line string) {
 	if len(app.logLines) > 200 {
 		app.logLines = app.logLines[len(app.logLines)-200:]
 	}
-	text := ""
+	var sb strings.Builder
 	for i := len(app.logLines) - 1; i >= 0; i-- {
-		text += app.logLines[i] + "\n"
+		sb.WriteString(app.logLines[i] + "\n")
 	}
-	app.logLabel.SetText(text)
+	app.logLabel.SetText(sb.String())
 	_ = time.AfterFunc(50*time.Millisecond, func() {
 		app.logScroll.ScrollToTop()
 	})
