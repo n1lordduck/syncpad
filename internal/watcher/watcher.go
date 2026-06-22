@@ -155,7 +155,7 @@ func (s *Session) Start() error {
 }
 
 func (s *Session) loop(w *fsnotify.Watcher) {
-	defer w.Close()
+	defer func() { _ = w.Close() }() //lol
 
 	debounce := make(map[string]debounceEntry)
 	var dmu sync.Mutex
