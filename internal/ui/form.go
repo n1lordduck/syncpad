@@ -30,27 +30,8 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	}
 
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("ex: addons")
+	nameEntry.SetPlaceHolder("ex: My cool Server")
 	nameEntry.SetText(c.Name)
-
-	localPathEntry := widget.NewEntry()
-	localPathEntry.SetPlaceHolder("/home/user/gmod/addons")
-	localPathEntry.SetText(c.LocalPath)
-
-	browseBtn := widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
-		path, err := pickFolderNative()
-		if err != nil || path == "" {
-			d := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
-				if err != nil || lu == nil {
-					return
-				}
-				localPathEntry.SetText(lu.Path())
-			}, w)
-			d.Show()
-			return
-		}
-		localPathEntry.SetText(path)
-	})
 
 	hostEntry := widget.NewEntry()
 	hostEntry.SetPlaceHolder("sftp.provider.com")
@@ -72,19 +53,19 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 
 	keyBrowseBtn := widget.NewButtonWithIcon("", theme.FileIcon(), func() {
 		path, err := pickFileNative()
-		if err != nil || path == "" {
-			d := dialog.NewFileOpen(func(f fyne.URIReadCloser, err error) {
-				if err != nil || f == nil {
-					return
-				}
-				keyPathEntry.SetText(f.URI().Path())
-				_ = f.Close()
-			}, w)
-			d.SetFilter(storage.NewExtensionFileFilter([]string{".pem", ".ppk", ""}))
-			d.Show()
+		if err == nil && path != "" {
+			keyPathEntry.SetText(path)
 			return
 		}
-		keyPathEntry.SetText(path)
+		d := dialog.NewFileOpen(func(f fyne.URIReadCloser, err error) {
+			if err != nil || f == nil {
+				return
+			}
+			keyPathEntry.SetText(f.URI().Path())
+			_ = f.Close()
+		}, w)
+		d.SetFilter(storage.NewExtensionFileFilter([]string{".pem", ".ppk", ""}))
+		d.Show()
 	})
 	keyBrowseBtn.Disable()
 
@@ -93,11 +74,11 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			passEntry.Enable()
 			keyPathEntry.Disable()
 			keyBrowseBtn.Disable()
-		} else {
-			passEntry.Disable()
-			keyPathEntry.Enable()
-			keyBrowseBtn.Enable()
+			return
 		}
+		passEntry.Disable()
+		keyPathEntry.Enable()
+		keyBrowseBtn.Enable()
 	})
 	if c.SFTP.Auth == config.AuthKey {
 		authSelect.SetSelected("Private key")
@@ -106,15 +87,15 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	}
 
 	remotePathEntry := widget.NewEntry()
-	remotePathEntry.SetPlaceHolder("/garrysmod/addons")
+	remotePathEntry.SetPlaceHolder("/home/server/garrysmod")
 	remotePathEntry.SetText(c.SFTP.RemotePath)
 
 	syncModeSelect := widget.NewSelect([]string{"Manual", "Automatic"}, func(val string) {
 		if val == "Automatic" {
 			c.SyncMode = config.SyncAuto
-		} else {
-			c.SyncMode = config.SyncManual
+			return
 		}
+		c.SyncMode = config.SyncManual
 	})
 	if c.SyncMode == config.SyncAuto {
 		syncModeSelect.SetSelected("Automatic")
@@ -127,20 +108,77 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	})
 	deleteSyncCheck.SetChecked(c.DeleteSync)
 
-	form := widget.NewForm(
-		widget.NewFormItem("Container name", nameEntry),
-		widget.NewFormItem("Local path", container.NewBorder(nil, nil, nil, browseBtn, localPathEntry)),
-	)
+	foldersListContainer := container.NewVBox()
+	var currentFolders []config.FolderItem
+	if c.Folders != nil {
+		currentFolders = append(currentFolders, c.Folders...)
+	}
 
-	sftpForm := widget.NewForm(
-		widget.NewFormItem("Host", hostEntry),
-		widget.NewFormItem("Port", portEntry),
-		widget.NewFormItem("Username", userEntry),
-		widget.NewFormItem("Authentication", authSelect),
-		widget.NewFormItem("Password", passEntry),
-		widget.NewFormItem("Private key", container.NewBorder(nil, nil, nil, keyBrowseBtn, keyPathEntry)),
-		widget.NewFormItem("Remote path", remotePathEntry),
-	)
+	var refreshFoldersList func()
+	refreshFoldersList = func() {
+		foldersListContainer.Objects = nil
+		for i, folder := range currentFolders {
+			idx := i
+			localLbl := widget.NewLabel(folder.LocalPath)
+			localLbl.Truncation = fyne.TextTruncateEllipsis
+
+			item := container.NewBorder(
+				nil, nil,
+				widget.NewLabel("["+folder.Name+"] "),
+				widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+					currentFolders = append(currentFolders[:idx], currentFolders[idx+1:]...)
+					refreshFoldersList()
+				}),
+				localLbl,
+			)
+			foldersListContainer.Add(item)
+		}
+		foldersListContainer.Refresh()
+	}
+	refreshFoldersList()
+
+	addFolderBtn := widget.NewButtonWithIcon("Add Folder Mapped Entry", theme.ContentAddIcon(), func() {
+		nameIn := widget.NewEntry()
+		nameIn.SetPlaceHolder("ex: addons")
+		pathIn := widget.NewEntry()
+		pathIn.SetPlaceHolder("/home/user/gmod/addons")
+
+		browseFolderBtn := widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
+			path, err := pickFolderNative()
+			if err == nil && path != "" {
+				pathIn.SetText(path)
+				return
+			}
+			d := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
+				if err == nil && lu != nil {
+					pathIn.SetText(lu.Path())
+				}
+			}, w)
+			d.Show()
+		})
+
+		fForm := widget.NewForm(
+			widget.NewFormItem("Remote Folder Name", nameIn),
+			widget.NewFormItem("Local Target Path", container.NewBorder(nil, nil, nil, browseFolderBtn, pathIn)),
+		)
+
+		formContainer := container.NewMax(fForm)
+
+		var d dialog.Dialog
+		d = dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel", formContainer, func(ok bool) {
+			if !ok || nameIn.Text == "" || pathIn.Text == "" {
+				return
+			}
+			currentFolders = append(currentFolders, config.FolderItem{
+				Name:      nameIn.Text,
+				LocalPath: pathIn.Text,
+			})
+			refreshFoldersList()
+		}, w)
+
+		d.Resize(fyne.NewSize(560, 240))
+		d.Show()
+	})
 
 	testBtn := widget.NewButtonWithIcon("Test connection", theme.MediaPlayIcon(), func() {
 		port, _ := strconv.Atoi(portEntry.Text)
@@ -167,7 +205,6 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			client, err := sftpclient.Connect(cfg)
 			if err != nil {
 				friendlyMsg := sftperrors.Parse(err)
-
 				log.Printf("SFTP Connection failed: %v", err)
 				statusLabel.SetText(friendlyMsg.Error())
 				return
@@ -177,23 +214,48 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		}()
 	})
 
-	content := container.NewVBox(
-		widget.NewLabel("Container settings"),
-		form,
-		widget.NewSeparator(),
-		widget.NewLabel("SFTP settings"),
-		sftpForm,
+	foldersScroll := container.NewVScroll(foldersListContainer)
+	foldersScroll.SetMinSize(fyne.NewSize(340, 240))
+
+	leftColumn := container.NewBorder(
+		container.NewVBox(
+			widget.NewLabelWithStyle("Container Identification", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewForm(widget.NewFormItem("Name", nameEntry)),
+			widget.NewSeparator(),
+			widget.NewLabelWithStyle("Mapped Folder Entries", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		),
+		addFolderBtn,
+		nil, nil,
+		foldersScroll,
+	)
+	rightColumn := container.NewVBox(
+		widget.NewLabelWithStyle("SFTP Target Settings (Root)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			widget.NewFormItem("Host", hostEntry),
+			widget.NewFormItem("Port", portEntry),
+			widget.NewFormItem("Username", userEntry),
+			widget.NewFormItem("Authentication", authSelect),
+			widget.NewFormItem("Password", passEntry),
+			widget.NewFormItem("Private key", container.NewBorder(nil, nil, nil, keyBrowseBtn, keyPathEntry)),
+			widget.NewFormItem("Root Path", remotePathEntry),
+		),
 		testBtn,
-		widget.NewForm(widget.NewFormItem("Sync mode", syncModeSelect)),
+		widget.NewSeparator(),
+		widget.NewForm(widget.NewFormItem("Sync Mode", syncModeSelect)),
 		deleteSyncCheck,
 	)
+
+	gridLayout := container.NewGridWithColumns(2, leftColumn, rightColumn)
 
 	title := "New Container"
 	if existing != nil {
 		title = "Edit: " + existing.Name
 	}
 
-	dialog.ShowCustomConfirm(title, "Save", "Cancel", content, func(ok bool) {
+	scrollableContent := container.NewVScroll(gridLayout)
+	scrollableContent.SetMinSize(fyne.NewSize(760, 420))
+
+	dialog.ShowCustomConfirm(title, "Save", "Cancel", scrollableContent, func(ok bool) {
 		if !ok {
 			return
 		}
@@ -208,7 +270,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		}
 
 		c.Name = nameEntry.Text
-		c.LocalPath = localPathEntry.Text
+		c.Folders = currentFolders
 		c.SFTP.Host = hostEntry.Text
 		c.SFTP.Port = port
 		c.SFTP.User = userEntry.Text
