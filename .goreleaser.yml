@@ -15,7 +15,7 @@ builds:
     goarch:
       - amd64
     ldflags:
-      - -s -w
+      - -s -w -trimpath
 
 archives:
   - id: syncpad
