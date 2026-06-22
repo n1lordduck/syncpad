@@ -12,10 +12,10 @@ var (
 	ErrTimeout           = fmt.Errorf("connection timeout")
 )
 
-var friendlyErrors = map[error]error{
-	ErrConnectionRefused: fmt.Errorf("Connection refused. Check the host and port."),
-	ErrAuthentication:    fmt.Errorf("Authentication failed. Check your password or private key."),
-	ErrTimeout:           fmt.Errorf("Connection timed out. Check your internet or firewall."),
+var friendlyMessages = map[error]string{
+	ErrConnectionRefused: "Connection refused. Check the host and port.",
+	ErrAuthentication:    "Authentication failed. Check your password or private key.",
+	ErrTimeout:           "Connection timed out. Check your internet or firewall.",
 }
 
 var errorMappings = []struct {
@@ -59,8 +59,8 @@ func Parse(err error) error {
 
 		targetErr := errorMappings[i-1].target
 
-		if friendly, found := friendlyErrors[targetErr]; found {
-			return friendly
+		if friendly, found := friendlyMessages[targetErr]; found {
+			return fmt.Errorf("%s", friendly)
 		}
 		return targetErr
 	}
