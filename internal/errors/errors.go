@@ -7,10 +7,16 @@ import (
 )
 
 var (
-	ErrConnectionRefused = fmt.Errorf("connection refused error")
-	ErrAuthentication    = fmt.Errorf("auth error")
-	ErrTimeout           = fmt.Errorf("timeout error")
+	ErrConnectionRefused = fmt.Errorf("connection refused")
+	ErrAuthentication    = fmt.Errorf("authentication failed")
+	ErrTimeout           = fmt.Errorf("connection timeout")
 )
+
+var friendlyErrors = map[error]error{
+	ErrConnectionRefused: fmt.Errorf("Connection refused. Check the host and port."),
+	ErrAuthentication:    fmt.Errorf("Authentication failed. Check your password or private key."),
+	ErrTimeout:           fmt.Errorf("Connection timed out. Check your internet or firewall."),
+}
 
 var errorMappings = []struct {
 	pattern string
@@ -18,6 +24,8 @@ var errorMappings = []struct {
 }{
 	{"connection refused", ErrConnectionRefused},
 	{"unable to authenticate", ErrAuthentication},
+	{"auth cancel", ErrAuthentication},
+	{"keyboard-interactive", ErrAuthentication},
 	{"timeout", ErrTimeout},
 }
 
@@ -30,7 +38,7 @@ func init() {
 	}
 
 	combinedPattern := strings.Join(patterns, "|")
-	errorRegex = regexp.MustCompile(combinedPattern)
+	errorRegex = regexp.MustCompile("(?i)" + combinedPattern)
 }
 
 func Parse(err error) error {
@@ -39,16 +47,22 @@ func Parse(err error) error {
 	}
 
 	msg := err.Error()
-
 	indices := errorRegex.FindStringSubmatchIndex(msg)
 	if indices == nil {
 		return err
 	}
 
 	for i := 1; i < len(indices)/2; i++ {
-		if indices[i*2] != -1 {
-			return errorMappings[i-1].target
+		if indices[i*2] == -1 {
+			continue
 		}
+
+		targetErr := errorMappings[i-1].target
+
+		if friendly, found := friendlyErrors[targetErr]; found {
+			return friendly
+		}
+		return targetErr
 	}
 
 	return err
