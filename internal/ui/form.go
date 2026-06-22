@@ -164,8 +164,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 
 		formContainer := container.NewStack(fForm)
 
-		var d dialog.Dialog
-		d = dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel", formContainer, func(ok bool) {
+		d := dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel", formContainer, func(ok bool) {
 			if !ok || nameIn.Text == "" || pathIn.Text == "" {
 				return
 			}
