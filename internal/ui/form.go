@@ -162,7 +162,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			widget.NewFormItem("Local Target Path", container.NewBorder(nil, nil, nil, browseFolderBtn, pathIn)),
 		)
 
-		formContainer := container.NewMax(fForm)
+		formContainer := container.NewStack(fForm)
 
 		var d dialog.Dialog
 		d = dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel", formContainer, func(ok bool) {
