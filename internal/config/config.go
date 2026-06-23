@@ -83,6 +83,15 @@ func configDir() (string, error) {
 	return dir, os.MkdirAll(dir, 0700)
 }
 
+func PendingDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "pending")
+	return p, os.MkdirAll(p, 0700)
+}
+
 func Load() (*Store, error) {
 	dir, err := configDir()
 	if err != nil {
@@ -90,7 +99,6 @@ func Load() (*Store, error) {
 	}
 	path := filepath.Join(dir, "containers.json")
 	s := &Store{path: path}
-
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
@@ -104,7 +112,6 @@ func Load() (*Store, error) {
 func (s *Store) Save() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
