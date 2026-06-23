@@ -305,7 +305,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		app.mu.Lock()
 		delete(app.sessions, c.ID)
 		app.mu.Unlock()
-		app.appendLog("⏹ " + c.Name + " stopped.")
+		app.appendLog(c.Name + " stopped.")
 		watchBtn.SetText("Watch")
 		watchBtn.SetIcon(theme.MediaPlayIcon())
 		sendBtn.Disable()
@@ -314,27 +314,30 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		return
 	}
 
-	sess := watcher.NewSession(c, app.store.GetGlobalIgnore())
-	if err := sess.Start(); err != nil {
-		dialog.ShowError(err, app.win)
-		return
-	}
-
-	app.mu.Lock()
-	app.sessions[c.ID] = sess
-	app.mu.Unlock()
-
-	app.appendLog("▶ " + c.Name + " monitoring.")
-	watchBtn.SetText("Stop")
-	watchBtn.SetIcon(theme.MediaStopIcon())
-
-	if c.SyncMode == config.SyncManual || c.SyncMode == "" {
-		sendBtn.Enable()
-	}
-
-	app.sidebar.Refresh()
+	watchBtn.Disable()
+	app.appendLog(c.Name + " initializing...")
 
 	go func() {
+		sess := watcher.NewSession(c, app.store.GetGlobalIgnore())
+		if err := sess.Start(); err != nil {
+			dialog.ShowError(err, app.win)
+			watchBtn.Enable()
+			return
+		}
+
+		app.mu.Lock()
+		app.sessions[c.ID] = sess
+		app.mu.Unlock()
+
+		app.appendLog(c.Name + " monitoring.")
+		watchBtn.SetText("Stop")
+		watchBtn.SetIcon(theme.MediaStopIcon())
+		watchBtn.Enable()
+		if c.SyncMode == config.SyncManual || c.SyncMode == "" {
+			sendBtn.Enable()
+		}
+		app.sidebar.Refresh()
+
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
@@ -346,7 +349,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 				}
 				prefix := ""
 				if ev.Err {
-					prefix = "⚠ "
+					prefix = "! "
 				}
 				app.appendLog(fmt.Sprintf("[%s] %s%s", ev.Time.Format("15:04:05"), prefix, ev.Message))
 
@@ -370,24 +373,24 @@ func (app *App) refreshPending(sess *watcher.Session) {
 }
 
 func (app *App) doPull(sess *watcher.Session, c *config.Container) {
-	app.appendLog("⟳ pulling " + c.Name + "...")
+	app.appendLog("pulling " + c.Name + "...")
 
 	result, err := sess.Pull(func(msg string, isErr bool) {
 		prefix := ""
 		if isErr {
-			prefix = "⚠ "
+			prefix = "! "
 		}
 		app.appendLog("[pull] " + prefix + msg)
 	})
 
 	if err != nil {
-		app.appendLog("⚠ pull failed: " + err.Error())
+		app.appendLog("pull failed: " + err.Error())
 		return
 	}
 
 	if len(result.Errors) > 0 {
 		for _, e := range result.Errors {
-			app.appendLog("⚠ " + e)
+			app.appendLog(e)
 		}
 	}
 
@@ -411,10 +414,10 @@ func (app *App) doPull(sess *watcher.Session, c *config.Container) {
 		}
 		for _, p := range result.LocalOnly {
 			if err := os.Remove(p); err != nil {
-				app.appendLog("⚠ delete " + p + ": " + err.Error())
+				app.appendLog("delete " + p + ": " + err.Error())
 				continue
 			}
-			app.appendLog("✕ removed local " + p)
+			app.appendLog("removed local " + p)
 		}
 	}, app.win)
 }
