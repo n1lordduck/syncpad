@@ -61,7 +61,10 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 
 func (s *Session) isIgnored(path string) bool {
 	name := filepath.Base(path)
-	allPatterns := append(config.DefaultIgnorePatterns, s.GlobalIgnore...)
+
+	allPatterns := make([]string, 0, len(config.DefaultIgnorePatterns)+len(s.GlobalIgnore)+len(s.Container.IgnorePatterns))
+	allPatterns = append(allPatterns, config.DefaultIgnorePatterns...)
+	allPatterns = append(allPatterns, s.GlobalIgnore...)
 	allPatterns = append(allPatterns, s.Container.IgnorePatterns...)
 	for _, pattern := range allPatterns {
 		matched, err := filepath.Match(pattern, name)
@@ -80,11 +83,8 @@ func (s *Session) PendingCount() int {
 
 func (s *Session) resolveRemotePath(localFilePath string) (string, bool) {
 	for _, folder := range s.Container.Folders {
-		if !strings.HasPrefix(localFilePath, folder.LocalPath) {
-			continue
-		}
 		rel, err := filepath.Rel(folder.LocalPath, localFilePath)
-		if err != nil {
+		if err != nil || strings.HasPrefix(rel, "..") {
 			continue
 		}
 		return filepath.ToSlash(filepath.Join(s.Container.SFTP.RemotePath, folder.Name, rel)), true
@@ -111,11 +111,13 @@ func (s *Session) Flush() {
 	}
 	defer client.Close()
 
+	var failed []string
 	ok := 0
 	for _, pf := range snap {
 		remote, found := s.resolveRemotePath(pf.LocalPath)
 		if !found {
 			s.emit("error: could not resolve remote destination for "+filepath.Base(pf.LocalPath), true)
+			failed = append(failed, pf.LocalPath)
 			continue
 		}
 
@@ -131,19 +133,35 @@ func (s *Session) Flush() {
 
 		if opErr != nil {
 			s.emit("error "+filepath.Base(pf.LocalPath)+": "+opErr.Error(), true)
+			failed = append(failed, pf.LocalPath)
 			continue
 		}
 
 		s.emit(opMsg, false)
 		ok++
-		s.mu.Lock()
-		delete(s.pending, pf.LocalPath)
-		s.mu.Unlock()
 	}
+
+	// single lock acquisition to clear all succeeded files
+	s.mu.Lock()
+	for _, pf := range snap {
+		if !contains(failed, pf.LocalPath) {
+			delete(s.pending, pf.LocalPath)
+		}
+	}
+	s.mu.Unlock()
 
 	if ok > 0 {
 		s.emit(fmt.Sprintf("✔ %d file(s) sent.", ok), false)
 	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) Start() error {
@@ -156,15 +174,18 @@ func (s *Session) Start() error {
 		return fmt.Errorf("watcher: %w", err)
 	}
 
+	watchCount := 0
 	for _, folder := range s.Container.Folders {
-		if err := addDirsRecursive(w, folder.LocalPath); err != nil {
+		n, err := addDirsRecursive(w, folder.LocalPath)
+		if err != nil {
 			_ = w.Close()
 			return fmt.Errorf("watch path %s: %w", folder.LocalPath, err)
 		}
+		watchCount += n
 		s.emit("Watching folder: "+folder.LocalPath, false)
 	}
 
-	s.emit("Session started (mode: "+string(s.Container.SyncMode)+")", false)
+	s.emit(fmt.Sprintf("Session started (mode: %s, watching %d dirs)", s.Container.SyncMode, watchCount), false)
 	go s.loop(w)
 	return nil
 }
@@ -203,10 +224,11 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce m
 
 	if op&fsnotify.Create != 0 {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			if err := addDirsRecursive(w, path); err != nil {
+			n, err := addDirsRecursive(w, path)
+			if err != nil {
 				s.emit("failed to watch new dir "+path+": "+err.Error(), true)
 			} else {
-				s.emit("Watching new folder: "+path, false)
+				s.emit(fmt.Sprintf("Watching new folder: %s (%d dirs)", path, n), false)
 			}
 			return
 		}
@@ -266,16 +288,22 @@ func (s *Session) emit(msg string, isErr bool) {
 	}
 }
 
-func addDirsRecursive(w *fsnotify.Watcher, root string) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func addDirsRecursive(w *fsnotify.Watcher, root string) (int, error) {
+	count := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		return w.Add(path)
+		if err := w.Add(path); err != nil {
+			return err
+		}
+		count++
+		return nil
 	})
+	return count, err
 }
 
 type PullResult struct {
@@ -284,8 +312,6 @@ type PullResult struct {
 	Errors     []string
 }
 
-// Pull syncs remote → local for all folders in the container.
-// Returns files that exist only locally so the caller can decide what to do with them.
 func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	client, err := sftpclient.Connect(s.Container.SFTP)
 	if err != nil {
@@ -325,7 +351,6 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			emit("↓ "+filepath.Base(rf.LocalPath), false)
 		}
 
-		// find local-only files
 		_ = filepath.WalkDir(folder.LocalPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
