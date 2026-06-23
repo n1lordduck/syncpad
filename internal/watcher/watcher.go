@@ -38,8 +38,9 @@ type debounceEntry struct {
 }
 
 type Session struct {
-	Container *config.Container
-	Events    chan Event
+	Container    *config.Container
+	GlobalIgnore []string
+	Events       chan Event
 
 	mu      sync.Mutex
 	pending map[string]PendingFile
@@ -48,13 +49,27 @@ type Session struct {
 	once sync.Once
 }
 
-func NewSession(c *config.Container) *Session {
+func NewSession(c *config.Container, globalIgnore []string) *Session {
 	return &Session{
-		Container: c,
-		Events:    make(chan Event, 128),
-		pending:   make(map[string]PendingFile),
-		stop:      make(chan struct{}),
+		Container:    c,
+		GlobalIgnore: globalIgnore,
+		Events:       make(chan Event, 128),
+		pending:      make(map[string]PendingFile),
+		stop:         make(chan struct{}),
 	}
+}
+
+func (s *Session) isIgnored(path string) bool {
+	name := filepath.Base(path)
+	allPatterns := append(config.DefaultIgnorePatterns, s.GlobalIgnore...)
+	allPatterns = append(allPatterns, s.Container.IgnorePatterns...)
+	for _, pattern := range allPatterns {
+		matched, err := filepath.Match(pattern, name)
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) PendingCount() int {
@@ -155,7 +170,7 @@ func (s *Session) Start() error {
 }
 
 func (s *Session) loop(w *fsnotify.Watcher) {
-	defer func() { _ = w.Close() }() //lol
+	defer func() { _ = w.Close() }()
 	defer close(s.Events)
 
 	debounce := make(map[string]debounceEntry)
@@ -195,6 +210,10 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce m
 			}
 			return
 		}
+	}
+
+	if s.isIgnored(path) {
+		return
 	}
 
 	dmu.Lock()
@@ -257,4 +276,70 @@ func addDirsRecursive(w *fsnotify.Watcher, root string) error {
 		}
 		return w.Add(path)
 	})
+}
+
+type PullResult struct {
+	Downloaded []string
+	LocalOnly  []string
+	Errors     []string
+}
+
+// Pull syncs remote → local for all folders in the container.
+// Returns files that exist only locally so the caller can decide what to do with them.
+func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
+	client, err := sftpclient.Connect(s.Container.SFTP)
+	if err != nil {
+		return nil, fmt.Errorf("SFTP connection error: %w", err)
+	}
+	defer client.Close()
+
+	result := &PullResult{}
+
+	for _, folder := range s.Container.Folders {
+		remotePath := filepath.ToSlash(filepath.Join(s.Container.SFTP.RemotePath, folder.Name))
+		remoteFiles, err := client.ListRemote(remotePath, folder.LocalPath)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("list remote %s: %v", remotePath, err))
+			continue
+		}
+
+		remoteSet := make(map[string]struct{}, len(remoteFiles))
+		for _, rf := range remoteFiles {
+			remoteSet[rf.LocalPath] = struct{}{}
+
+			if s.isIgnored(rf.LocalPath) {
+				continue
+			}
+
+			if !sftpclient.NeedsUpdate(rf.LocalPath, rf) {
+				continue
+			}
+
+			if err := client.Download(rf.RemotePath, rf.LocalPath); err != nil {
+				result.Errors = append(result.Errors, filepath.Base(rf.LocalPath)+": "+err.Error())
+				emit("download error "+filepath.Base(rf.LocalPath)+": "+err.Error(), true)
+				continue
+			}
+
+			result.Downloaded = append(result.Downloaded, rf.LocalPath)
+			emit("↓ "+filepath.Base(rf.LocalPath), false)
+		}
+
+		// find local-only files
+		_ = filepath.WalkDir(folder.LocalPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || s.isIgnored(path) {
+				return nil
+			}
+			if _, exists := remoteSet[path]; !exists {
+				result.LocalOnly = append(result.LocalOnly, path)
+			}
+			return nil
+		})
+	}
+
+	if len(result.Downloaded) > 0 {
+		emit(fmt.Sprintf("✔ %d file(s) pulled.", len(result.Downloaded)), false)
+	}
+
+	return result, nil
 }

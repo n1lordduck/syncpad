@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -177,6 +178,31 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		})
 	})
 
+	ignoreBtn := widget.NewButtonWithIcon("Ignore", theme.ContentRemoveIcon(), func() {
+		if app.selected == nil {
+			return
+		}
+		ShowIgnoreForm(app.win, app.store, app.selected, func() {
+			app.store.Update(app.selected)
+			_ = app.store.Save()
+		})
+	})
+
+	pullBtn := widget.NewButtonWithIcon("Pull", theme.DownloadIcon(), func() {
+		if app.selected == nil {
+			return
+		}
+		c := app.selected
+		app.mu.Lock()
+		sess, ok := app.sessions[c.ID]
+		app.mu.Unlock()
+		if !ok {
+			dialog.ShowInformation("Not watching", "Start watching the container before pulling.", app.win)
+			return
+		}
+		go app.doPull(sess, c)
+	})
+
 	deleteBtn := widget.NewButtonWithIcon("Remove", theme.DeleteIcon(), func() {
 		if app.selected == nil {
 			return
@@ -258,7 +284,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 
 	bottomActions := container.NewVBox(
 		app.pendingLabel,
-		container.NewHBox(app.watchBtn, app.sendBtn, editBtn, deleteBtn),
+		container.NewHBox(app.watchBtn, app.sendBtn, pullBtn, editBtn, ignoreBtn, deleteBtn),
 	)
 
 	return container.NewBorder(
@@ -288,7 +314,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		return
 	}
 
-	sess := watcher.NewSession(c)
+	sess := watcher.NewSession(c, app.store.GetGlobalIgnore())
 	if err := sess.Start(); err != nil {
 		dialog.ShowError(err, app.win)
 		return
@@ -341,6 +367,56 @@ func (app *App) refreshPending(sess *watcher.Session) {
 		return
 	}
 	app.pendingLabel.Hide()
+}
+
+func (app *App) doPull(sess *watcher.Session, c *config.Container) {
+	app.appendLog("⟳ pulling " + c.Name + "...")
+
+	result, err := sess.Pull(func(msg string, isErr bool) {
+		prefix := ""
+		if isErr {
+			prefix = "⚠ "
+		}
+		app.appendLog("[pull] " + prefix + msg)
+	})
+
+	if err != nil {
+		app.appendLog("⚠ pull failed: " + err.Error())
+		return
+	}
+
+	if len(result.Errors) > 0 {
+		for _, e := range result.Errors {
+			app.appendLog("⚠ " + e)
+		}
+	}
+
+	if len(result.LocalOnly) == 0 {
+		return
+	}
+
+	names := make([]string, len(result.LocalOnly))
+	for i, p := range result.LocalOnly {
+		names[i] = "• " + p
+	}
+	msg := fmt.Sprintf(
+		"%d local file(s) not found on remote:\n\n%s\n\nDelete them locally?",
+		len(result.LocalOnly),
+		strings.Join(names, "\n"),
+	)
+
+	dialog.ShowConfirm("Local-only files", msg, func(ok bool) {
+		if !ok {
+			return
+		}
+		for _, p := range result.LocalOnly {
+			if err := os.Remove(p); err != nil {
+				app.appendLog("⚠ delete " + p + ": " + err.Error())
+				continue
+			}
+			app.appendLog("✕ removed local " + p)
+		}
+	}, app.win)
 }
 
 func (app *App) appendLog(line string) {
