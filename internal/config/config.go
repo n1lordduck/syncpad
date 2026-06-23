@@ -43,17 +43,32 @@ func (f FolderItem) GetRemotePath(baseRemotePath string) string {
 	return filepath.ToSlash(filepath.Join(baseRemotePath, f.Name))
 }
 
+var DefaultIgnorePatterns = []string{
+	".syncignore",
+	".syncpadignore",
+	".ignore",
+	".env",
+	".env.*",
+	"*.log",
+	"*.tmp",
+	"*.swp",
+	"*.DS_Store",
+	"Thumbs.db",
+}
+
 type Container struct {
-	ID         string       `json:"id"`
-	Name       string       `json:"name"`
-	SFTP       SFTPConfig   `json:"sftp"`
-	Folders    []FolderItem `json:"folders"`
-	SyncMode   SyncMode     `json:"sync_mode"`
-	DeleteSync bool         `json:"delete_sync"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	SFTP           SFTPConfig   `json:"sftp"`
+	Folders        []FolderItem `json:"folders"`
+	SyncMode       SyncMode     `json:"sync_mode"`
+	DeleteSync     bool         `json:"delete_sync"`
+	IgnorePatterns []string     `json:"ignore_patterns,omitempty"`
 }
 
 type Store struct {
-	Containers []*Container `json:"containers"`
+	Containers   []*Container `json:"containers"`
+	GlobalIgnore []string     `json:"global_ignore,omitempty"`
 
 	mu   sync.RWMutex
 	path string
@@ -135,4 +150,18 @@ func (s *Store) All() []*Container {
 	out := make([]*Container, len(s.Containers))
 	copy(out, s.Containers)
 	return out
+}
+
+func (s *Store) GetGlobalIgnore() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.GlobalIgnore))
+	copy(out, s.GlobalIgnore)
+	return out
+}
+
+func (s *Store) SetGlobalIgnore(patterns []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.GlobalIgnore = patterns
 }
