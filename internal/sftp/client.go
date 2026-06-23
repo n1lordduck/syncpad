@@ -21,38 +21,40 @@ type Client struct {
 	cfg  config.SFTPConfig
 }
 
+type RemoteFile struct {
+	RemotePath string
+	LocalPath  string
+	ModTime    int64
+	Size       int64
+}
+
 func Connect(cfg config.SFTPConfig) (*Client, error) {
 	authMethods, err := buildAuth(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-
 	sshCfg := &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         15 * time.Second,
 	}
-
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, sshCfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake: %w", err)
 	}
-
 	sshClient := ssh.NewClient(sshConn, chans, reqs)
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		_ = sshClient.Close()
 		return nil, fmt.Errorf("sftp session: %w", err)
 	}
-
 	return &Client{ssh: sshClient, sftp: sftpClient, cfg: cfg}, nil
 }
 
@@ -78,19 +80,16 @@ func (c *Client) Upload(localPath, remotePath string) error {
 	if err := c.mkdirAll(filepath.Dir(remotePath)); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(remotePath), err)
 	}
-
 	src, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("open local: %w", err)
 	}
 	defer func() { _ = src.Close() }()
-
 	dst, err := c.sftp.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("open remote %s: %w", remotePath, err)
 	}
 	defer func() { _ = dst.Close() }()
-
 	_, err = io.Copy(dst, src)
 	return err
 }
@@ -106,6 +105,60 @@ func (c *Client) Delete(remotePath string) error {
 func (c *Client) RemotePath(cfg config.SFTPConfig, localBase, localPath string) string {
 	rel, _ := filepath.Rel(localBase, localPath)
 	return cfg.RemotePath + "/" + filepath.ToSlash(rel)
+}
+
+func (c *Client) ListRemote(remotePath, localBase string) ([]RemoteFile, error) {
+	walker := c.sftp.Walk(remotePath)
+	var files []RemoteFile
+	for walker.Step() {
+		if err := walker.Err(); err != nil {
+			continue
+		}
+		stat := walker.Stat()
+		if stat.IsDir() {
+			continue
+		}
+		rel, err := filepath.Rel(filepath.ToSlash(remotePath), filepath.ToSlash(walker.Path()))
+		if err != nil {
+			continue
+		}
+		files = append(files, RemoteFile{
+			RemotePath: walker.Path(),
+			LocalPath:  filepath.Join(localBase, filepath.FromSlash(rel)),
+			ModTime:    stat.ModTime().Unix(),
+			Size:       stat.Size(),
+		})
+	}
+	return files, nil
+}
+
+func NeedsUpdate(localPath string, rf RemoteFile) bool {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return true
+	}
+	if info.Size() != rf.Size {
+		return true
+	}
+	return info.ModTime().Unix() < rf.ModTime
+}
+
+func (c *Client) Download(remotePath, localPath string) error {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return err
+	}
+	src, err := c.sftp.Open(remotePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dst.Close() }()
+	_, err = io.Copy(dst, src)
+	return err
 }
 
 func (c *Client) mkdirAll(path string) error {
