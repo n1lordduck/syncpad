@@ -1,7 +1,10 @@
 package watcher
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,8 +25,8 @@ const (
 )
 
 type PendingFile struct {
-	LocalPath string
-	Kind      EventKind
+	LocalPath string    `json:"local_path"`
+	Kind      EventKind `json:"kind"`
 }
 
 type Event struct {
@@ -42,26 +45,141 @@ type Session struct {
 	GlobalIgnore []string
 	Events       chan Event
 
-	mu      sync.Mutex
-	pending map[string]PendingFile
+	mu        sync.Mutex
+	pending   map[string]PendingFile
+	knownHash map[string][]byte
 
 	stop chan struct{}
 	once sync.Once
+
+	pendingFile string
 }
 
 func NewSession(c *config.Container, globalIgnore []string) *Session {
-	return &Session{
+	pendingFile := ""
+	if dir, err := config.PendingDir(); err == nil {
+		pendingFile = filepath.Join(dir, c.ID+".json")
+	}
+
+	s := &Session{
 		Container:    c,
 		GlobalIgnore: globalIgnore,
 		Events:       make(chan Event, 128),
 		pending:      make(map[string]PendingFile),
+		knownHash:    make(map[string][]byte),
 		stop:         make(chan struct{}),
+		pendingFile:  pendingFile,
 	}
+
+	s.buildBaselineHashes()
+
+	s.loadPending()
+
+	return s
+}
+
+func (s *Session) buildBaselineHashes() {
+	for _, folder := range s.Container.Folders {
+		_ = filepath.WalkDir(folder.LocalPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || s.isIgnored(path) {
+				return nil
+			}
+			if h, err := hashFile(path); err == nil {
+				s.knownHash[path] = h
+			}
+			return nil
+		})
+	}
+}
+
+func (s *Session) loadPending() {
+	if s.pendingFile == "" {
+		return
+	}
+	data, err := os.ReadFile(s.pendingFile)
+	if err != nil {
+		return
+	}
+	var saved map[string]PendingFile
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return
+	}
+
+	dropped := 0
+	for k, v := range saved {
+		if v.Kind == KindUpsert {
+			if current, err := hashFile(v.LocalPath); err == nil {
+				s.mu.Lock()
+				known := s.knownHash[v.LocalPath]
+				s.mu.Unlock()
+				if hashesEqual(current, known) {
+					dropped++
+					continue
+				}
+			}
+		}
+		s.pending[k] = v
+	}
+
+	switch {
+	case len(s.pending) > 0 && dropped > 0:
+		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session (%d reverted, skipped).", len(s.pending), dropped), false)
+	case len(s.pending) > 0:
+		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session.", len(s.pending)), false)
+	case dropped > 0:
+		s.emit(fmt.Sprintf("All %d pending file(s) from last session were reverted — nothing to send.", dropped), false)
+	}
+}
+
+func (s *Session) savePending() {
+	if s.pendingFile == "" {
+		return
+	}
+	s.mu.Lock()
+	snap := make(map[string]PendingFile, len(s.pending))
+	for k, v := range s.pending {
+		snap[k] = v
+	}
+	s.mu.Unlock()
+
+	if len(snap) == 0 {
+		_ = os.Remove(s.pendingFile)
+		return
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.pendingFile, data, 0600)
+}
+
+func hashFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
+}
+
+func hashesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Session) isIgnored(path string) bool {
 	name := filepath.Base(path)
-
 	allPatterns := make([]string, 0, len(config.DefaultIgnorePatterns)+len(s.GlobalIgnore)+len(s.Container.IgnorePatterns))
 	allPatterns = append(allPatterns, config.DefaultIgnorePatterns...)
 	allPatterns = append(allPatterns, s.GlobalIgnore...)
@@ -137,11 +255,18 @@ func (s *Session) Flush() {
 			continue
 		}
 
+		if pf.Kind == KindUpsert {
+			if h, err := hashFile(pf.LocalPath); err == nil {
+				s.mu.Lock()
+				s.knownHash[pf.LocalPath] = h
+				s.mu.Unlock()
+			}
+		}
+
 		s.emit(opMsg, false)
 		ok++
 	}
 
-	// single lock acquisition to clear all succeeded files
 	s.mu.Lock()
 	for _, pf := range snap {
 		if !contains(failed, pf.LocalPath) {
@@ -153,6 +278,8 @@ func (s *Session) Flush() {
 	if ok > 0 {
 		s.emit(fmt.Sprintf("✔ %d file(s) sent.", ok), false)
 	}
+
+	s.savePending()
 }
 
 func contains(ss []string, s string) bool {
@@ -271,13 +398,37 @@ func (s *Session) processEvent(path string, op fsnotify.Op) {
 }
 
 func (s *Session) queue(localPath string, kind EventKind) {
+	if kind == KindUpsert {
+		if current, err := hashFile(localPath); err == nil {
+			s.mu.Lock()
+			known := s.knownHash[localPath]
+			s.mu.Unlock()
+			if hashesEqual(current, known) {
+				s.mu.Lock()
+				_, wasPending := s.pending[localPath]
+				delete(s.pending, localPath)
+				count := len(s.pending)
+				s.mu.Unlock()
+				if wasPending {
+					s.emit(fmt.Sprintf("~ %s reverted, removed from pending (%d total)", filepath.Base(localPath), count), false)
+					s.savePending()
+				}
+				return
+			}
+		}
+	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.pending[localPath] = PendingFile{LocalPath: localPath, Kind: kind}
-	s.emit(fmt.Sprintf("~ %s pending (%d total)", filepath.Base(localPath), len(s.pending)), false)
+	count := len(s.pending)
+	s.mu.Unlock()
+
+	s.emit(fmt.Sprintf("~ %s pending (%d total)", filepath.Base(localPath), count), false)
+	s.savePending()
 }
 
 func (s *Session) Stop() {
+	s.savePending()
 	s.once.Do(func() { close(s.stop) })
 }
 
@@ -345,6 +496,12 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 				result.Errors = append(result.Errors, filepath.Base(rf.LocalPath)+": "+err.Error())
 				emit("download error "+filepath.Base(rf.LocalPath)+": "+err.Error(), true)
 				continue
+			}
+
+			if h, err := hashFile(rf.LocalPath); err == nil {
+				s.mu.Lock()
+				s.knownHash[rf.LocalPath] = h
+				s.mu.Unlock()
 			}
 
 			result.Downloaded = append(result.Downloaded, rf.LocalPath)
