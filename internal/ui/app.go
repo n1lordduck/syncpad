@@ -17,9 +17,9 @@ import (
 )
 
 type App struct {
-	fyne  fyne.App
-	win   fyne.Window
-	store *config.Store
+	fyneApp fyne.App
+	win     fyne.Window
+	store   *config.Store
 
 	mu       sync.Mutex
 	sessions map[string]*watcher.Session
@@ -40,7 +40,7 @@ type App struct {
 
 func NewApp(a fyne.App, store *config.Store) *App {
 	return &App{
-		fyne:          a,
+		fyneApp:       a,
 		store:         store,
 		sessions:      make(map[string]*watcher.Session),
 		logLabel:      widget.NewLabel(""),
@@ -49,7 +49,7 @@ func NewApp(a fyne.App, store *config.Store) *App {
 }
 
 func (app *App) BuildWindow() fyne.Window {
-	app.win = app.fyne.NewWindow("SyncPad")
+	app.win = app.fyneApp.NewWindow("SyncPad")
 	app.win.Resize(fyne.NewSize(900, 580))
 
 	app.logLabel.Wrapping = fyne.TextWrapWord
