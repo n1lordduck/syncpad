@@ -40,6 +40,12 @@ type debounceEntry struct {
 	op    fsnotify.Op
 }
 
+type hashCacheEntry struct {
+	Hash  []byte `json:"hash"`
+	Mtime int64  `json:"mtime"`
+	Size  int64  `json:"size"`
+}
+
 type Session struct {
 	Container    *config.Container
 	GlobalIgnore []string
@@ -48,34 +54,70 @@ type Session struct {
 	mu        sync.Mutex
 	pending   map[string]PendingFile
 	knownHash map[string][]byte
+	hashCache map[string]hashCacheEntry
 
 	stop chan struct{}
 	once sync.Once
 
-	pendingFile string
+	pendingFile   string
+	hashCacheFile string
 }
 
 func NewSession(c *config.Container, globalIgnore []string) *Session {
 	pendingFile := ""
+	hashCacheFile := ""
 	if dir, err := config.PendingDir(); err == nil {
 		pendingFile = filepath.Join(dir, c.ID+".json")
+		hashCacheFile = filepath.Join(dir, c.ID+".hash.json")
 	}
 
 	s := &Session{
-		Container:    c,
-		GlobalIgnore: globalIgnore,
-		Events:       make(chan Event, 128),
-		pending:      make(map[string]PendingFile),
-		knownHash:    make(map[string][]byte),
-		stop:         make(chan struct{}),
-		pendingFile:  pendingFile,
+		Container:     c,
+		GlobalIgnore:  globalIgnore,
+		Events:        make(chan Event, 128),
+		pending:       make(map[string]PendingFile),
+		knownHash:     make(map[string][]byte),
+		hashCache:     make(map[string]hashCacheEntry),
+		stop:          make(chan struct{}),
+		pendingFile:   pendingFile,
+		hashCacheFile: hashCacheFile,
 	}
 
+	s.loadHashCache()
 	s.buildBaselineHashes()
-
+	s.saveHashCache()
 	s.loadPending()
 
 	return s
+}
+
+func (s *Session) loadHashCache() {
+	if s.hashCacheFile == "" {
+		return
+	}
+	data, err := os.ReadFile(s.hashCacheFile)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(data, &s.hashCache)
+}
+
+func (s *Session) saveHashCache() {
+	if s.hashCacheFile == "" {
+		return
+	}
+	s.mu.Lock()
+	snap := make(map[string]hashCacheEntry, len(s.hashCache))
+	for k, v := range s.hashCache {
+		snap[k] = v
+	}
+	s.mu.Unlock()
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.hashCacheFile, data, 0600)
 }
 
 func (s *Session) buildBaselineHashes() {
@@ -84,9 +126,24 @@ func (s *Session) buildBaselineHashes() {
 			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
 			}
-			if h, err := hashFile(path); err == nil {
-				s.knownHash[path] = h
+			info, err := d.Info()
+			if err != nil {
+				return nil
 			}
+			mtime := info.ModTime().Unix()
+			size := info.Size()
+
+			if entry, ok := s.hashCache[path]; ok && entry.Mtime == mtime && entry.Size == size {
+				s.knownHash[path] = entry.Hash
+				return nil
+			}
+
+			h, err := hashFile(path)
+			if err != nil {
+				return nil
+			}
+			s.knownHash[path] = h
+			s.hashCache[path] = hashCacheEntry{Hash: h, Mtime: mtime, Size: size}
 			return nil
 		})
 	}
@@ -257,8 +314,16 @@ func (s *Session) Flush() {
 
 		if pf.Kind == KindUpsert {
 			if h, err := hashFile(pf.LocalPath); err == nil {
+				info, statErr := os.Stat(pf.LocalPath)
 				s.mu.Lock()
 				s.knownHash[pf.LocalPath] = h
+				if statErr == nil {
+					s.hashCache[pf.LocalPath] = hashCacheEntry{
+						Hash:  h,
+						Mtime: info.ModTime().Unix(),
+						Size:  info.Size(),
+					}
+				}
 				s.mu.Unlock()
 			}
 		}
@@ -280,6 +345,7 @@ func (s *Session) Flush() {
 	}
 
 	s.savePending()
+	s.saveHashCache()
 }
 
 func contains(ss []string, s string) bool {
@@ -415,6 +481,17 @@ func (s *Session) queue(localPath string, kind EventKind) {
 				}
 				return
 			}
+			info, err := os.Stat(localPath)
+			if err == nil {
+				s.mu.Lock()
+				s.knownHash[localPath] = current
+				s.hashCache[localPath] = hashCacheEntry{
+					Hash:  current,
+					Mtime: info.ModTime().Unix(),
+					Size:  info.Size(),
+				}
+				s.mu.Unlock()
+			}
 		}
 	}
 
@@ -429,6 +506,7 @@ func (s *Session) queue(localPath string, kind EventKind) {
 
 func (s *Session) Stop() {
 	s.savePending()
+	s.saveHashCache()
 	s.once.Do(func() { close(s.stop) })
 }
 
@@ -499,8 +577,16 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			}
 
 			if h, err := hashFile(rf.LocalPath); err == nil {
+				info, statErr := os.Stat(rf.LocalPath)
 				s.mu.Lock()
 				s.knownHash[rf.LocalPath] = h
+				if statErr == nil {
+					s.hashCache[rf.LocalPath] = hashCacheEntry{
+						Hash:  h,
+						Mtime: info.ModTime().Unix(),
+						Size:  info.Size(),
+					}
+				}
 				s.mu.Unlock()
 			}
 
@@ -521,6 +607,7 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 
 	if len(result.Downloaded) > 0 {
 		emit(fmt.Sprintf("✔ %d file(s) pulled.", len(result.Downloaded)), false)
+		s.saveHashCache()
 	}
 
 	return result, nil
