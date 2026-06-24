@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/color"
 	"log"
 	"os"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"github.com/n1lordduck/syncpad/internal/config"
 	"github.com/n1lordduck/syncpad/internal/ui"
-	"image/color"
 )
 
 type forcedDarkTheme struct {
@@ -30,23 +30,18 @@ func showSplash(a fyne.App) fyne.Window {
 	splash.Resize(fyne.NewSize(320, 160))
 	splash.CenterOnScreen()
 	splash.SetPadded(false)
-
 	bg := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 24, A: 255})
-
 	title := canvas.NewText("SyncPad", color.NRGBA{R: 220, G: 220, B: 255, A: 255})
 	title.TextSize = 28
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
-
 	sub := canvas.NewText("loading...", color.NRGBA{R: 140, G: 140, B: 160, A: 255})
 	sub.TextSize = 13
 	sub.Alignment = fyne.TextAlignCenter
-
 	content := container.NewStack(
 		bg,
 		container.NewCenter(container.NewVBox(title, sub)),
 	)
-
 	splash.SetContent(content)
 	splash.Show()
 	return splash
@@ -63,7 +58,6 @@ func main() {
 	if err != nil {
 		res, _ = fyne.LoadResourceFromPath("../../assets/tray.png")
 	}
-
 	if res != nil {
 		a.SetIcon(res)
 	} else {
@@ -71,6 +65,7 @@ func main() {
 	}
 
 	var mainWin fyne.Window
+	var syncApp *ui.App
 
 	if desk, ok := a.(desktop.App); ok {
 		m := fyne.NewMenu("SyncPad",
@@ -81,6 +76,9 @@ func main() {
 			}),
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Quit", func() {
+				if syncApp != nil {
+					syncApp.StopAll()
+				}
 				a.Quit()
 			}),
 		)
@@ -97,17 +95,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("config: %v", err)
 		}
-
-		syncApp := ui.NewApp(a, store)
+		syncApp = ui.NewApp(a, store)
 		win := syncApp.BuildWindow()
-
 		mainWin = win
 		mainWin.SetCloseIntercept(func() {
 			mainWin.Hide()
 		})
-
 		time.Sleep(1200 * time.Millisecond)
-
 		splash.Close()
 		mainWin.Show()
 	}()
