@@ -188,7 +188,8 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		})
 	})
 
-	pullBtn := widget.NewButtonWithIcon("Pull", theme.DownloadIcon(), func() {
+	pullBtn := widget.NewButtonWithIcon("Pull", theme.DownloadIcon(), nil)
+	pullBtn.OnTapped = func() {
 		if app.selected == nil {
 			return
 		}
@@ -200,8 +201,14 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			dialog.ShowInformation("Not watching", "Start watching the container before pulling.", app.win)
 			return
 		}
-		go app.doPull(sess, c)
-	})
+		pullBtn.SetText("Pulling...")
+		pullBtn.Disable()
+		go func() {
+			app.doPull(sess, c)
+			pullBtn.SetText("Pull")
+			pullBtn.Enable()
+		}()
+	}
 
 	deleteBtn := widget.NewButtonWithIcon("Remove", theme.DeleteIcon(), func() {
 		if app.selected == nil {
