@@ -48,6 +48,14 @@ func NewApp(a fyne.App, store *config.Store) *App {
 	}
 }
 
+func (app *App) StopAll() {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	for _, s := range app.sessions {
+		s.Stop()
+	}
+}
+
 func (app *App) BuildWindow() fyne.Window {
 	app.win = app.fyneApp.NewWindow("SyncPad")
 	app.win.Resize(fyne.NewSize(900, 580))
