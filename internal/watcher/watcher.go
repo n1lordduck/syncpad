@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -56,6 +58,8 @@ type Session struct {
 	knownHash map[string][]byte
 	hashCache map[string]hashCacheEntry
 
+	pulling atomic.Bool
+
 	stop chan struct{}
 	once sync.Once
 
@@ -83,10 +87,15 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 		hashCacheFile: hashCacheFile,
 	}
 
+	s.pulling.Store(true)
 	s.loadHashCache()
-	s.buildBaselineHashes()
-	s.saveHashCache()
 	s.loadPending()
+
+	go func() {
+		s.buildBaselineHashes()
+		s.saveHashCache()
+		s.pulling.Store(false)
+	}()
 
 	return s
 }
@@ -99,7 +108,9 @@ func (s *Session) loadHashCache() {
 	if err != nil {
 		return
 	}
+	s.mu.Lock()
 	_ = json.Unmarshal(data, &s.hashCache)
+	s.mu.Unlock()
 }
 
 func (s *Session) saveHashCache() {
@@ -121,32 +132,61 @@ func (s *Session) saveHashCache() {
 }
 
 func (s *Session) buildBaselineHashes() {
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 2 {
+		numWorkers = 2
+	}
+
+	pathsChan := make(chan string, 128)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range pathsChan {
+				info, err := os.Stat(path)
+				if err != nil {
+					continue
+				}
+				mtime := info.ModTime().Unix()
+				size := info.Size()
+
+				s.mu.Lock()
+				entry, ok := s.hashCache[path]
+				s.mu.Unlock()
+
+				if ok && entry.Mtime == mtime && entry.Size == size {
+					s.mu.Lock()
+					s.knownHash[path] = entry.Hash
+					s.mu.Unlock()
+					continue
+				}
+
+				h, err := hashFile(path)
+				if err != nil {
+					continue
+				}
+
+				s.mu.Lock()
+				s.knownHash[path] = h
+				s.hashCache[path] = hashCacheEntry{Hash: h, Mtime: mtime, Size: size}
+				s.mu.Unlock()
+			}
+		}()
+	}
+
 	for _, folder := range s.Container.Folders {
 		_ = filepath.WalkDir(folder.LocalPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
 			}
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			mtime := info.ModTime().Unix()
-			size := info.Size()
-
-			if entry, ok := s.hashCache[path]; ok && entry.Mtime == mtime && entry.Size == size {
-				s.knownHash[path] = entry.Hash
-				return nil
-			}
-
-			h, err := hashFile(path)
-			if err != nil {
-				return nil
-			}
-			s.knownHash[path] = h
-			s.hashCache[path] = hashCacheEntry{Hash: h, Mtime: mtime, Size: size}
+			pathsChan <- path
 			return nil
 		})
 	}
+	close(pathsChan)
+	wg.Wait()
 }
 
 func (s *Session) loadPending() {
@@ -175,14 +215,20 @@ func (s *Session) loadPending() {
 				}
 			}
 		}
+		s.mu.Lock()
 		s.pending[k] = v
+		s.mu.Unlock()
 	}
 
+	s.mu.Lock()
+	pendingLen := len(s.pending)
+	s.mu.Unlock()
+
 	switch {
-	case len(s.pending) > 0 && dropped > 0:
-		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session (%d reverted, skipped).", len(s.pending), dropped), false)
-	case len(s.pending) > 0:
-		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session.", len(s.pending)), false)
+	case pendingLen > 0 && dropped > 0:
+		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session (%d reverted, skipped).", pendingLen, dropped), false)
+	case pendingLen > 0:
+		s.emit(fmt.Sprintf("Restored %d pending file(s) from last session.", pendingLen), false)
 	case dropped > 0:
 		s.emit(fmt.Sprintf("All %d pending file(s) from last session were reverted — nothing to send.", dropped), false)
 	}
@@ -415,6 +461,15 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce m
 	path := ev.Name
 	op := ev.Op
 
+	if s.pulling.Load() {
+		if op&fsnotify.Create != 0 {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				_, _ = addDirsRecursive(w, path)
+			}
+		}
+		return
+	}
+
 	if op&fsnotify.Create != 0 {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			n, err := addDirsRecursive(w, path)
@@ -452,6 +507,10 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce m
 }
 
 func (s *Session) processEvent(path string, op fsnotify.Op) {
+	if s.pulling.Load() {
+		return
+	}
+
 	if op&(fsnotify.Create|fsnotify.Write) != 0 {
 		s.queue(path, KindUpsert)
 	} else if op&fsnotify.Remove != 0 && s.Container.DeleteSync {
@@ -480,17 +539,6 @@ func (s *Session) queue(localPath string, kind EventKind) {
 					s.savePending()
 				}
 				return
-			}
-			info, err := os.Stat(localPath)
-			if err == nil {
-				s.mu.Lock()
-				s.knownHash[localPath] = current
-				s.hashCache[localPath] = hashCacheEntry{
-					Hash:  current,
-					Mtime: info.ModTime().Unix(),
-					Size:  info.Size(),
-				}
-				s.mu.Unlock()
 			}
 		}
 	}
@@ -542,8 +590,11 @@ type PullResult struct {
 }
 
 func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
+	s.pulling.Store(true)
+
 	client, err := sftpclient.Connect(s.Container.SFTP)
 	if err != nil {
+		s.pulling.Store(false)
 		return nil, fmt.Errorf("SFTP connection error: %w", err)
 	}
 	defer client.Close()
@@ -607,8 +658,10 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 
 	if len(result.Downloaded) > 0 {
 		emit(fmt.Sprintf("✔ %d file(s) pulled.", len(result.Downloaded)), false)
-		s.saveHashCache()
 	}
+
+	s.saveHashCache()
+	s.pulling.Store(false)
 
 	return result, nil
 }
