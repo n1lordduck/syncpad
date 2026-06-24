@@ -2,12 +2,14 @@ package main
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"github.com/n1lordduck/syncpad/internal/config"
 	"github.com/n1lordduck/syncpad/internal/ui"
@@ -51,8 +53,42 @@ func showSplash(a fyne.App) fyne.Window {
 }
 
 func main() {
+	_ = os.Setenv("LC_ALL", "en_US.UTF-8")
+	_ = os.Setenv("LANG", "en_US.UTF-8")
+
 	a := app.NewWithID("dev.n1lordduck.syncpad")
 	a.Settings().SetTheme(&forcedDarkTheme{Theme: theme.DefaultTheme()})
+
+	res, err := fyne.LoadResourceFromPath("assets/tray.png")
+	if err != nil {
+		res, _ = fyne.LoadResourceFromPath("../../assets/tray.png")
+	}
+
+	if res != nil {
+		a.SetIcon(res)
+	} else {
+		log.Println("WARNING: tray.png icon was not found! The system tray will not initialize.")
+	}
+
+	var mainWin fyne.Window
+
+	if desk, ok := a.(desktop.App); ok {
+		m := fyne.NewMenu("SyncPad",
+			fyne.NewMenuItem("Open", func() {
+				if mainWin != nil {
+					mainWin.Show()
+				}
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Quit", func() {
+				a.Quit()
+			}),
+		)
+		desk.SetSystemTrayMenu(m)
+		if res != nil {
+			desk.SetSystemTrayIcon(res)
+		}
+	}
 
 	splash := showSplash(a)
 
@@ -63,24 +99,12 @@ func main() {
 		}
 
 		syncApp := ui.NewApp(a, store)
-		mainWin := syncApp.BuildWindow()
+		win := syncApp.BuildWindow()
 
-		// System tray — descomentar quando tiver ícone definido
-		// if desk, ok := a.(desktop.App); ok {
-		//     m := fyne.NewMenu("SyncPad",
-		//         fyne.NewMenuItem("Abrir", func() {
-		//             mainWin.Show()
-		//         }),
-		//         fyne.NewMenuItemSeparator(),
-		//         fyne.NewMenuItem("Sair", func() {
-		//             a.Quit()
-		//         }),
-		//     )
-		//     desk.SetSystemTrayMenu(m)
-		//     mainWin.SetCloseIntercept(func() {
-		//         mainWin.Hide()
-		//     })
-		// }
+		mainWin = win
+		mainWin.SetCloseIntercept(func() {
+			mainWin.Hide()
+		})
 
 		time.Sleep(1200 * time.Millisecond)
 
