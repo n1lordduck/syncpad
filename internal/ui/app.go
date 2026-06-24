@@ -127,8 +127,6 @@ func (app *App) renderFolders(c *config.Container) {
 	app.foldersScroll.Refresh()
 }
 
-// refreshSendBtn enables the Send button only when there are pending files,
-// and always updates the pending label to match.
 func (app *App) refreshSendBtn(sess *watcher.Session) {
 	n := sess.PendingCount()
 	if n > 0 {
@@ -277,7 +275,6 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			return
 		}
 
-		// Resuming view of an active session — restore full UI state.
 		app.watchBtn.SetText("Stop")
 		app.watchBtn.SetIcon(theme.MediaStopIcon())
 
@@ -290,7 +287,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			}
 			app.refreshSendBtn(sess)
 		} else {
-			// Auto mode: send button stays disabled, no pending label.
+
 			app.sendBtn.Disable()
 			app.pendingLabel.Hide()
 			app.appendLog(fmt.Sprintf("↩ Resuming session '%s' (auto mode).", c.Name))
@@ -357,7 +354,6 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		watchBtn.SetIcon(theme.MediaStopIcon())
 		watchBtn.Enable()
 
-		// Restore send button state from any pending carried over from last session.
 		if c.SyncMode == config.SyncManual || c.SyncMode == "" {
 			app.refreshSendBtn(sess)
 		}
@@ -388,7 +384,6 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 	}()
 }
 
-/*
 func (app *App) refreshPending(sess *watcher.Session) {
 	n := sess.PendingCount()
 	if n > 0 {
@@ -397,8 +392,7 @@ func (app *App) refreshPending(sess *watcher.Session) {
 		return
 	}
 	app.pendingLabel.Hide()
-    }
-*/
+}
 
 func (app *App) doPull(sess *watcher.Session, c *config.Container) {
 	app.appendLog("pulling " + c.Name + "...")

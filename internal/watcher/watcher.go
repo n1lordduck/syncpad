@@ -60,6 +60,8 @@ type Session struct {
 
 	pulling atomic.Bool
 
+	ready chan struct{}
+
 	stop chan struct{}
 	once sync.Once
 
@@ -78,10 +80,11 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 	s := &Session{
 		Container:     c,
 		GlobalIgnore:  globalIgnore,
-		Events:        make(chan Event, 128),
+		Events:        make(chan Event, 256),
 		pending:       make(map[string]PendingFile),
 		knownHash:     make(map[string][]byte),
 		hashCache:     make(map[string]hashCacheEntry),
+		ready:         make(chan struct{}),
 		stop:          make(chan struct{}),
 		pendingFile:   pendingFile,
 		hashCacheFile: hashCacheFile,
@@ -95,6 +98,7 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 		s.buildBaselineHashes()
 		s.saveHashCache()
 		s.pulling.Store(false)
+		close(s.ready)
 	}()
 
 	return s
@@ -408,8 +412,11 @@ func (s *Session) Start() error {
 		return fmt.Errorf("no folders configured to watch")
 	}
 
-	for s.pulling.Load() {
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-s.ready:
+	case <-s.stop:
+
+		return fmt.Errorf("session cancelled before start")
 	}
 
 	w, err := fsnotify.NewWatcher()
@@ -552,7 +559,7 @@ func (s *Session) queue(localPath string, kind EventKind) {
 	count := len(s.pending)
 	s.mu.Unlock()
 
-	s.emit(fmt.Sprintf("~ %s pending (%d total)", filepath.Base(localPath), count), false)
+	s.emit(fmt.Sprintf("~ %s modified, pending (%d total)", filepath.Base(localPath), count), false)
 	s.savePending()
 }
 
@@ -629,7 +636,6 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			remoteSet: make(map[string]struct{}, len(remoteFiles)),
 			localBase: folder.LocalPath,
 		}
-
 		for _, rf := range remoteFiles {
 			fw.remoteSet[rf.LocalPath] = struct{}{}
 			if s.isIgnored(rf.LocalPath) {
@@ -648,19 +654,20 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 		totalJobs += len(fw.jobs)
 	}
 
-	if totalJobs == 0 {
-		for _, fw := range allFolders {
-			_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
-				if err != nil || d.IsDir() || s.isIgnored(path) {
-					return nil
-				}
-				if _, exists := fw.remoteSet[path]; !exists {
-					result.LocalOnly = append(result.LocalOnly, path)
-				}
+	for _, fw := range allFolders {
+		_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
-			})
-		}
-		emit("Already up to date - no files to download.", false)
+			}
+			if _, exists := fw.remoteSet[path]; !exists {
+				result.LocalOnly = append(result.LocalOnly, path)
+			}
+			return nil
+		})
+	}
+
+	if totalJobs == 0 {
+		emit("✔ Already up to date — no files to download.", false)
 		return result, nil
 	}
 
@@ -669,39 +676,37 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 		numWorkers = 8
 	}
 
-	type result_t struct {
+	type resultT struct {
 		job downloadJob
 		h   []byte
 		err error
 	}
 
 	jobsCh := make(chan downloadJob, totalJobs)
-	resultsCh := make(chan result_t, totalJobs)
+	resultsCh := make(chan resultT, totalJobs)
 
 	for i := 0; i < numWorkers; i++ {
 		go func() {
 			wClient, err := sftpclient.Connect(s.Container.SFTP)
 			if err != nil {
 				for job := range jobsCh {
-					resultsCh <- result_t{job: job, err: err}
+					resultsCh <- resultT{job: job, err: err}
 				}
 				return
 			}
 			defer wClient.Close()
-
 			for job := range jobsCh {
 				dlErr := wClient.Download(job.rf.RemotePath, job.rf.LocalPath)
 				if dlErr != nil {
-					resultsCh <- result_t{job: job, err: dlErr}
+					resultsCh <- resultT{job: job, err: dlErr}
 					continue
 				}
 				h, _ := hashFile(job.rf.LocalPath)
-				resultsCh <- result_t{job: job, h: h}
+				resultsCh <- resultT{job: job, h: h}
 			}
 		}()
 	}
 
-	// send all jobs
 	for _, fw := range allFolders {
 		for _, job := range fw.jobs {
 			jobsCh <- job
@@ -716,8 +721,6 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			emit("download error "+filepath.Base(r.job.rf.LocalPath)+": "+r.err.Error(), true)
 			continue
 		}
-
-		// after the write is recognised as "no change" and not queued.
 		if r.h != nil {
 			info, statErr := os.Stat(r.job.rf.LocalPath)
 			s.mu.Lock()
@@ -731,21 +734,8 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			}
 			s.mu.Unlock()
 		}
-
 		result.Downloaded = append(result.Downloaded, r.job.rf.LocalPath)
 		emit("↓ "+filepath.Base(r.job.rf.LocalPath), false)
-	}
-
-	for _, fw := range allFolders {
-		_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || s.isIgnored(path) {
-				return nil
-			}
-			if _, exists := fw.remoteSet[path]; !exists {
-				result.LocalOnly = append(result.LocalOnly, path)
-			}
-			return nil
-		})
 	}
 
 	if len(result.Downloaded) > 0 {
@@ -753,6 +743,5 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	}
 
 	s.saveHashCache()
-
 	return result, nil
 }

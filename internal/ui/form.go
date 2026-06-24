@@ -21,7 +21,6 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		cp := *existing
 		c = &cp
 	}
-
 	if c.SFTP.Port == 0 {
 		c.SFTP.Port = 22
 	}
@@ -69,26 +68,76 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	})
 	keyBrowseBtn.Disable()
 
+	remotePathEntry := widget.NewEntry()
+	remotePathEntry.SetPlaceHolder("/home/server/garrysmod")
+	remotePathEntry.SetText(c.SFTP.RemotePath)
+
+	validationLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	validationLabel.Hide()
+
+	isAuthKey := c.SFTP.Auth == config.AuthKey
+
+	validate := func() bool {
+		var missing []string
+		if nameEntry.Text == "" {
+			missing = append(missing, "Container name")
+		}
+		if hostEntry.Text == "" {
+			missing = append(missing, "Host")
+		}
+		if userEntry.Text == "" {
+			missing = append(missing, "Username")
+		}
+		if remotePathEntry.Text == "" {
+			missing = append(missing, "Root Path")
+		}
+		if isAuthKey && keyPathEntry.Text == "" {
+			missing = append(missing, "Private key path")
+		}
+		if !isAuthKey && passEntry.Text == "" {
+			missing = append(missing, "Password")
+		}
+		if len(missing) > 0 {
+			msg := "Required: "
+			for i, m := range missing {
+				if i > 0 {
+					msg += ", "
+				}
+				msg += m
+			}
+			validationLabel.SetText(msg)
+			validationLabel.Show()
+			return false
+		}
+		validationLabel.Hide()
+		return true
+	}
+
+	nameEntry.OnChanged = func(_ string) { validate() }
+	hostEntry.OnChanged = func(_ string) { validate() }
+	userEntry.OnChanged = func(_ string) { validate() }
+	remotePathEntry.OnChanged = func(_ string) { validate() }
+	passEntry.OnChanged = func(_ string) { validate() }
+	keyPathEntry.OnChanged = func(_ string) { validate() }
+
 	authSelect := widget.NewSelect([]string{"Password", "Private key"}, func(val string) {
-		if val == "Password" {
+		isAuthKey = val == "Private key"
+		if isAuthKey {
+			passEntry.Disable()
+			keyPathEntry.Enable()
+			keyBrowseBtn.Enable()
+		} else {
 			passEntry.Enable()
 			keyPathEntry.Disable()
 			keyBrowseBtn.Disable()
-			return
 		}
-		passEntry.Disable()
-		keyPathEntry.Enable()
-		keyBrowseBtn.Enable()
+		validate()
 	})
 	if c.SFTP.Auth == config.AuthKey {
 		authSelect.SetSelected("Private key")
 	} else {
 		authSelect.SetSelected("Password")
 	}
-
-	remotePathEntry := widget.NewEntry()
-	remotePathEntry.SetPlaceHolder("/home/server/garrysmod")
-	remotePathEntry.SetText(c.SFTP.RemotePath)
 
 	syncModeSelect := widget.NewSelect([]string{"Manual", "Automatic"}, func(val string) {
 		if val == "Automatic" {
@@ -121,7 +170,6 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			idx := i
 			localLbl := widget.NewLabel(folder.LocalPath)
 			localLbl.Truncation = fyne.TextTruncateEllipsis
-
 			item := container.NewBorder(
 				nil, nil,
 				widget.NewLabel("["+folder.Name+"] "),
@@ -162,19 +210,18 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 			widget.NewFormItem("Local Target Path", container.NewBorder(nil, nil, nil, browseFolderBtn, pathIn)),
 		)
 
-		formContainer := container.NewStack(fForm)
-
-		d := dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel", formContainer, func(ok bool) {
-			if !ok || nameIn.Text == "" || pathIn.Text == "" {
-				return
-			}
-			currentFolders = append(currentFolders, config.FolderItem{
-				Name:      nameIn.Text,
-				LocalPath: pathIn.Text,
-			})
-			refreshFoldersList()
-		}, w)
-
+		d := dialog.NewCustomConfirm("New Folder Mapping", "Add", "Cancel",
+			container.NewStack(fForm),
+			func(ok bool) {
+				if !ok || nameIn.Text == "" || pathIn.Text == "" {
+					return
+				}
+				currentFolders = append(currentFolders, config.FolderItem{
+					Name:      nameIn.Text,
+					LocalPath: pathIn.Text,
+				})
+				refreshFoldersList()
+			}, w)
 		d.Resize(fyne.NewSize(560, 240))
 		d.Show()
 	})
@@ -214,7 +261,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 	})
 
 	foldersScroll := container.NewVScroll(foldersListContainer)
-	foldersScroll.SetMinSize(fyne.NewSize(340, 240))
+	foldersScroll.SetMinSize(fyne.NewSize(340, 200))
 
 	leftColumn := container.NewBorder(
 		container.NewVBox(
@@ -227,6 +274,7 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		nil, nil,
 		foldersScroll,
 	)
+
 	rightColumn := container.NewVBox(
 		widget.NewLabelWithStyle("SFTP Target Settings (Root)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
@@ -244,30 +292,36 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		deleteSyncCheck,
 	)
 
-	gridLayout := container.NewGridWithColumns(2, leftColumn, rightColumn)
+	content := container.NewVBox(
+		container.NewGridWithColumns(2, leftColumn, rightColumn),
+		validationLabel,
+	)
+
+	scrollableContent := container.NewVScroll(content)
+	scrollableContent.SetMinSize(fyne.NewSize(760, 440))
 
 	title := "New Container"
 	if existing != nil {
 		title = "Edit: " + existing.Name
 	}
 
-	scrollableContent := container.NewVScroll(gridLayout)
-	scrollableContent.SetMinSize(fyne.NewSize(760, 420))
-
 	dialog.ShowCustomConfirm(title, "Save", "Cancel", scrollableContent, func(ok bool) {
 		if !ok {
 			return
 		}
+
+		if !validate() {
+			return
+		}
+
 		port, _ := strconv.Atoi(portEntry.Text)
 		if port == 0 {
 			port = 22
 		}
-
 		auth := config.AuthPassword
 		if authSelect.Selected == "Private key" {
 			auth = config.AuthKey
 		}
-
 		c.Name = nameEntry.Text
 		c.Folders = currentFolders
 		c.SFTP.Host = hostEntry.Text
@@ -277,7 +331,6 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		c.SFTP.Password = passEntry.Text
 		c.SFTP.KeyPath = keyPathEntry.Text
 		c.SFTP.RemotePath = remotePathEntry.Text
-
 		onSave(c)
 	}, w)
 }
