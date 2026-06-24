@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 
@@ -305,15 +306,13 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		title = "Edit: " + existing.Name
 	}
 
-	dialog.ShowCustomConfirm(title, "Save", "Cancel", scrollableContent, func(ok bool) {
-		if !ok {
-			return
-		}
+	var d *dialog.CustomDialog
 
+	saveBtn := widget.NewButton("Save", func() {
 		if !validate() {
+			dialog.ShowError(fmt.Errorf(validationLabel.Text), w)
 			return
 		}
-
 		port, _ := strconv.Atoi(portEntry.Text)
 		if port == 0 {
 			port = 22
@@ -331,6 +330,19 @@ func ShowContainerForm(w fyne.Window, existing *config.Container, onSave func(*c
 		c.SFTP.Password = passEntry.Text
 		c.SFTP.KeyPath = keyPathEntry.Text
 		c.SFTP.RemotePath = remotePathEntry.Text
+		d.Hide()
 		onSave(c)
-	}, w)
+	})
+	saveBtn.Importance = widget.HighImportance
+
+	cancelBtn := widget.NewButton("Cancel", func() {
+		d.Hide()
+	})
+
+	buttons := container.NewHBox(cancelBtn, saveBtn)
+	fullContent := container.NewBorder(nil, buttons, nil, nil, scrollableContent)
+
+	d = dialog.NewCustomWithoutButtons(title, fullContent, w)
+	d.Resize(fyne.NewSize(800, 560))
+	d.Show()
 }
