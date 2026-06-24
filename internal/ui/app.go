@@ -388,6 +388,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 	}()
 }
 
+/*
 func (app *App) refreshPending(sess *watcher.Session) {
 	n := sess.PendingCount()
 	if n > 0 {
@@ -396,7 +397,8 @@ func (app *App) refreshPending(sess *watcher.Session) {
 		return
 	}
 	app.pendingLabel.Hide()
-}
+    }
+*/
 
 func (app *App) doPull(sess *watcher.Session, c *config.Container) {
 	app.appendLog("pulling " + c.Name + "...")
