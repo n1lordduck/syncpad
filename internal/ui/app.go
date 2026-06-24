@@ -127,6 +127,20 @@ func (app *App) renderFolders(c *config.Container) {
 	app.foldersScroll.Refresh()
 }
 
+// refreshSendBtn enables the Send button only when there are pending files,
+// and always updates the pending label to match.
+func (app *App) refreshSendBtn(sess *watcher.Session) {
+	n := sess.PendingCount()
+	if n > 0 {
+		app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
+		app.pendingLabel.Show()
+		app.sendBtn.Enable()
+		return
+	}
+	app.pendingLabel.Hide()
+	app.sendBtn.Disable()
+}
+
 func (app *App) buildDetailPanel() fyne.CanvasObject {
 	nameLabel := widget.NewLabelWithStyle("Select a container", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	hostLabel := widget.NewLabel("")
@@ -156,7 +170,7 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 		}
 		go func() {
 			sess.Flush()
-			app.refreshPending(sess)
+			app.refreshSendBtn(sess)
 		}()
 	})
 	app.sendBtn.Importance = widget.HighImportance
@@ -263,22 +277,24 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			return
 		}
 
+		// Resuming view of an active session — restore full UI state.
 		app.watchBtn.SetText("Stop")
 		app.watchBtn.SetIcon(theme.MediaStopIcon())
-		if c.SyncMode != config.SyncManual {
+
+		n := sess.PendingCount()
+		if c.SyncMode == config.SyncManual || c.SyncMode == "" {
+			if n > 0 {
+				app.appendLog(fmt.Sprintf("↩ Resuming session '%s' — %d pending file(s).", c.Name, n))
+			} else {
+				app.appendLog(fmt.Sprintf("↩ Resuming session '%s' — nothing pending.", c.Name))
+			}
+			app.refreshSendBtn(sess)
+		} else {
+			// Auto mode: send button stays disabled, no pending label.
 			app.sendBtn.Disable()
 			app.pendingLabel.Hide()
-			return
+			app.appendLog(fmt.Sprintf("↩ Resuming session '%s' (auto mode).", c.Name))
 		}
-
-		app.sendBtn.Enable()
-		n := sess.PendingCount()
-		if n > 0 {
-			app.pendingLabel.SetText(fmt.Sprintf("%d pending file(s)", n))
-			app.pendingLabel.Show()
-			return
-		}
-		app.pendingLabel.Hide()
 	}
 
 	topInfo := container.NewVBox(
@@ -340,9 +356,12 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 		watchBtn.SetText("Stop")
 		watchBtn.SetIcon(theme.MediaStopIcon())
 		watchBtn.Enable()
+
+		// Restore send button state from any pending carried over from last session.
 		if c.SyncMode == config.SyncManual || c.SyncMode == "" {
-			sendBtn.Enable()
+			app.refreshSendBtn(sess)
 		}
+
 		app.sidebar.Refresh()
 
 		ticker := time.NewTicker(2 * time.Second)
@@ -362,7 +381,7 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 
 			case <-ticker.C:
 				if c.SyncMode == config.SyncManual || c.SyncMode == "" {
-					app.refreshPending(sess)
+					app.refreshSendBtn(sess)
 				}
 			}
 		}
