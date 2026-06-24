@@ -408,6 +408,10 @@ func (s *Session) Start() error {
 		return fmt.Errorf("no folders configured to watch")
 	}
 
+	for s.pulling.Load() {
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
@@ -589,17 +593,29 @@ type PullResult struct {
 	Errors     []string
 }
 
+type downloadJob struct {
+	rf         sftpclient.RemoteFile
+	folderBase string
+}
+
 func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	s.pulling.Store(true)
+	defer s.pulling.Store(false)
 
 	client, err := sftpclient.Connect(s.Container.SFTP)
 	if err != nil {
-		s.pulling.Store(false)
 		return nil, fmt.Errorf("SFTP connection error: %w", err)
 	}
 	defer client.Close()
 
 	result := &PullResult{}
+
+	type folderWork struct {
+		jobs      []downloadJob
+		remoteSet map[string]struct{}
+		localBase string
+	}
+	var allFolders []folderWork
 
 	for _, folder := range s.Container.Folders {
 		remotePath := filepath.ToSlash(filepath.Join(s.Container.SFTP.RemotePath, folder.Name))
@@ -609,47 +625,123 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			continue
 		}
 
-		remoteSet := make(map[string]struct{}, len(remoteFiles))
-		for _, rf := range remoteFiles {
-			remoteSet[rf.LocalPath] = struct{}{}
+		fw := folderWork{
+			remoteSet: make(map[string]struct{}, len(remoteFiles)),
+			localBase: folder.LocalPath,
+		}
 
+		for _, rf := range remoteFiles {
+			fw.remoteSet[rf.LocalPath] = struct{}{}
 			if s.isIgnored(rf.LocalPath) {
 				continue
 			}
-
 			if !sftpclient.NeedsUpdate(rf.LocalPath, rf) {
 				continue
 			}
+			fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
+		}
+		allFolders = append(allFolders, fw)
+	}
 
-			if err := client.Download(rf.RemotePath, rf.LocalPath); err != nil {
-				result.Errors = append(result.Errors, filepath.Base(rf.LocalPath)+": "+err.Error())
-				emit("download error "+filepath.Base(rf.LocalPath)+": "+err.Error(), true)
-				continue
-			}
+	totalJobs := 0
+	for _, fw := range allFolders {
+		totalJobs += len(fw.jobs)
+	}
 
-			if h, err := hashFile(rf.LocalPath); err == nil {
-				info, statErr := os.Stat(rf.LocalPath)
-				s.mu.Lock()
-				s.knownHash[rf.LocalPath] = h
-				if statErr == nil {
-					s.hashCache[rf.LocalPath] = hashCacheEntry{
-						Hash:  h,
-						Mtime: info.ModTime().Unix(),
-						Size:  info.Size(),
-					}
+	if totalJobs == 0 {
+		for _, fw := range allFolders {
+			_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() || s.isIgnored(path) {
+					return nil
 				}
-				s.mu.Unlock()
-			}
+				if _, exists := fw.remoteSet[path]; !exists {
+					result.LocalOnly = append(result.LocalOnly, path)
+				}
+				return nil
+			})
+		}
+		emit("Already up to date - no files to download.", false)
+		return result, nil
+	}
 
-			result.Downloaded = append(result.Downloaded, rf.LocalPath)
-			emit("↓ "+filepath.Base(rf.LocalPath), false)
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+
+	type result_t struct {
+		job downloadJob
+		h   []byte
+		err error
+	}
+
+	jobsCh := make(chan downloadJob, totalJobs)
+	resultsCh := make(chan result_t, totalJobs)
+
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			wClient, err := sftpclient.Connect(s.Container.SFTP)
+			if err != nil {
+				for job := range jobsCh {
+					resultsCh <- result_t{job: job, err: err}
+				}
+				return
+			}
+			defer wClient.Close()
+
+			for job := range jobsCh {
+				dlErr := wClient.Download(job.rf.RemotePath, job.rf.LocalPath)
+				if dlErr != nil {
+					resultsCh <- result_t{job: job, err: dlErr}
+					continue
+				}
+				h, _ := hashFile(job.rf.LocalPath)
+				resultsCh <- result_t{job: job, h: h}
+			}
+		}()
+	}
+
+	// send all jobs
+	for _, fw := range allFolders {
+		for _, job := range fw.jobs {
+			jobsCh <- job
+		}
+	}
+	close(jobsCh)
+
+	for i := 0; i < totalJobs; i++ {
+		r := <-resultsCh
+		if r.err != nil {
+			result.Errors = append(result.Errors, filepath.Base(r.job.rf.LocalPath)+": "+r.err.Error())
+			emit("download error "+filepath.Base(r.job.rf.LocalPath)+": "+r.err.Error(), true)
+			continue
 		}
 
-		_ = filepath.WalkDir(folder.LocalPath, func(path string, d fs.DirEntry, err error) error {
+		// after the write is recognised as "no change" and not queued.
+		if r.h != nil {
+			info, statErr := os.Stat(r.job.rf.LocalPath)
+			s.mu.Lock()
+			s.knownHash[r.job.rf.LocalPath] = r.h
+			if statErr == nil {
+				s.hashCache[r.job.rf.LocalPath] = hashCacheEntry{
+					Hash:  r.h,
+					Mtime: info.ModTime().Unix(),
+					Size:  info.Size(),
+				}
+			}
+			s.mu.Unlock()
+		}
+
+		result.Downloaded = append(result.Downloaded, r.job.rf.LocalPath)
+		emit("↓ "+filepath.Base(r.job.rf.LocalPath), false)
+	}
+
+	for _, fw := range allFolders {
+		_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
 			}
-			if _, exists := remoteSet[path]; !exists {
+			if _, exists := fw.remoteSet[path]; !exists {
 				result.LocalOnly = append(result.LocalOnly, path)
 			}
 			return nil
@@ -661,7 +753,6 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	}
 
 	s.saveHashCache()
-	s.pulling.Store(false)
 
 	return result, nil
 }
