@@ -80,11 +80,14 @@ jobs:
           APPRUN
           chmod +x "$APPDIR/AppRun"
 
+          # Extract appimagetool to avoid needing FUSE on the runner
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
-            -O /tmp/appimagetool
-          chmod +x /tmp/appimagetool
+            -O /tmp/appimagetool.AppImage
+          chmod +x /tmp/appimagetool.AppImage
+          cd /tmp && /tmp/appimagetool.AppImage --appimage-extract
+          cd $GITHUB_WORKSPACE
 
-          ARCH=x86_64 /tmp/appimagetool --no-appstream \
+          ARCH=x86_64 /tmp/squashfs-root/AppRun --no-appstream \
             "$APPDIR" "dist/syncpad_${TAG}_linux_x86_64.AppImage"
 
       - name: Upload AppImage to release
