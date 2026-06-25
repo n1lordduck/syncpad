@@ -674,7 +674,7 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	}
 
 	var triageJobs []triageJob
-	var skipDown []sftpclient.RemoteFile
+	var dlJobs []downloadJob
 
 	for _, l := range listings {
 		for _, rf := range l.remoteFiles {
@@ -683,73 +683,69 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			}
 			localInfo, statErr := os.Stat(rf.LocalPath)
 			if statErr != nil {
-				triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase})
+				dlJobs = append(dlJobs, downloadJob{rf: rf, folderBase: l.folderBase})
 				continue
 			}
 			if localInfo.Size() != rf.Size {
-				triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase})
+				dlJobs = append(dlJobs, downloadJob{rf: rf, folderBase: l.folderBase})
 				continue
 			}
 			s.mu.Lock()
 			localHash := s.knownHash[rf.LocalPath]
 			s.mu.Unlock()
-			if len(localHash) == 0 {
-				localHash, _ = hashFile(rf.LocalPath)
-				if localHash != nil {
-					s.storeLocalHash(rf.LocalPath, localHash)
-				}
-			}
 			triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase, localHash: localHash})
-			_ = skipDown
 		}
 	}
 
-	numTriage := runtime.NumCPU()
-	if numTriage > 8 {
-		numTriage = 8
-	}
+	if len(triageJobs) > 0 {
+		numTriage := runtime.NumCPU()
+		if numTriage > 8 {
+			numTriage = 8
+		}
 
-	triageCh := make(chan triageJob, len(triageJobs))
-	triageResCh := make(chan triageResult, len(triageJobs))
+		triageCh := make(chan triageJob, len(triageJobs))
+		triageResCh := make(chan triageResult, len(triageJobs))
 
-	for i := 0; i < numTriage; i++ {
-		go func() {
-			tClient, err := sftpclient.Connect(s.Container.SFTP)
-			if err != nil {
-				for job := range triageCh {
-					triageResCh <- triageResult{job: job, err: err}
-				}
-				return
-			}
-			defer tClient.Close()
-			for job := range triageCh {
-				if len(job.localHash) == 0 {
-					triageResCh <- triageResult{job: job, needsDown: true}
-					continue
-				}
-				rh, err := tClient.HashRemote(job.rf.RemotePath)
+		for i := 0; i < numTriage; i++ {
+			go func() {
+				tClient, err := sftpclient.Connect(s.Container.SFTP)
 				if err != nil {
-					triageResCh <- triageResult{job: job, needsDown: true, err: err}
-					continue
+					for job := range triageCh {
+						triageResCh <- triageResult{job: job, needsDown: true, err: err}
+					}
+					return
 				}
-				triageResCh <- triageResult{job: job, remoteHash: rh, needsDown: !hashesEqual(job.localHash, rh)}
-			}
-		}()
-	}
-
-	for _, tj := range triageJobs {
-		triageCh <- tj
-	}
-	close(triageCh)
-
-	var dlJobs []downloadJob
-	for range triageJobs {
-		tr := <-triageResCh
-		if tr.err != nil && tr.needsDown {
-			dlJobs = append(dlJobs, downloadJob{rf: tr.job.rf, folderBase: tr.job.folderBase})
-			continue
+				defer tClient.Close()
+				for job := range triageCh {
+					lh := job.localHash
+					if len(lh) == 0 {
+						lh, err = hashFile(job.rf.LocalPath)
+						if err != nil {
+							triageResCh <- triageResult{job: job, needsDown: true, err: err}
+							continue
+						}
+						s.storeLocalHash(job.rf.LocalPath, lh)
+					}
+					rh, err := tClient.HashRemote(job.rf.RemotePath)
+					if err != nil {
+						triageResCh <- triageResult{job: job, needsDown: true, err: err}
+						continue
+					}
+					triageResCh <- triageResult{job: job, remoteHash: rh, needsDown: !hashesEqual(lh, rh)}
+				}
+			}()
 		}
-		if tr.needsDown {
+
+		for _, tj := range triageJobs {
+			triageCh <- tj
+		}
+		close(triageCh)
+
+		for range triageJobs {
+			tr := <-triageResCh
+			if !tr.needsDown {
+				continue
+			}
 			rf := tr.job.rf
 			rf.Hash = tr.remoteHash
 			dlJobs = append(dlJobs, downloadJob{rf: rf, folderBase: tr.job.folderBase})
