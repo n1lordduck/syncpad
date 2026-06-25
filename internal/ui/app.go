@@ -27,7 +27,9 @@ type App struct {
 	sidebar   *widget.List
 	logLabel  *widget.Label
 	logScroll *container.Scroll
-	logLines  []string
+
+	logMu    sync.Mutex
+	logLines []string
 
 	selected *config.Container
 
@@ -295,7 +297,6 @@ func (app *App) buildDetailPanel() fyne.CanvasObject {
 			}
 			app.refreshSendBtn(sess)
 		} else {
-
 			app.sendBtn.Disable()
 			app.pendingLabel.Hide()
 			app.appendLog(fmt.Sprintf("↩ Resuming session '%s' (auto mode).", c.Name))
@@ -375,6 +376,11 @@ func (app *App) toggleWatch(c *config.Container, watchBtn *widget.Button, sendBt
 			select {
 			case ev, ok := <-sess.Events:
 				if !ok {
+					watchBtn.SetText("Watch")
+					watchBtn.SetIcon(theme.MediaPlayIcon())
+					sendBtn.Disable()
+					pendingLabel.Hide()
+					app.sidebar.Refresh()
 					return
 				}
 				prefix := ""
@@ -443,6 +449,7 @@ func (app *App) doPull(sess *watcher.Session, c *config.Container) {
 }
 
 func (app *App) appendLog(line string) {
+	app.logMu.Lock()
 	app.logLines = append(app.logLines, line)
 	if len(app.logLines) > 200 {
 		app.logLines = app.logLines[len(app.logLines)-200:]
@@ -451,8 +458,9 @@ func (app *App) appendLog(line string) {
 	for i := len(app.logLines) - 1; i >= 0; i-- {
 		sb.WriteString(app.logLines[i] + "\n")
 	}
-	app.logLabel.SetText(sb.String())
-	_ = time.AfterFunc(50*time.Millisecond, func() {
-		app.logScroll.ScrollToTop()
-	})
+	text := sb.String()
+	app.logMu.Unlock()
+
+	app.logLabel.SetText(text)
+	app.logScroll.ScrollToTop()
 }
