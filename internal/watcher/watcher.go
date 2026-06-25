@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -62,12 +63,12 @@ type Session struct {
 	pulling          atomic.Bool
 
 	ready chan struct{}
+	stop  chan struct{}
+	once  sync.Once
 
-	stop chan struct{}
-	once sync.Once
-
-	pendingFile   string
-	hashCacheFile string
+	pendingFile    string
+	hashCacheFile  string
+	ignorePatterns []string
 }
 
 func NewSession(c *config.Container, globalIgnore []string) *Session {
@@ -78,17 +79,23 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 		hashCacheFile = filepath.Join(dir, c.ID+".hash.json")
 	}
 
+	patterns := make([]string, 0, len(config.DefaultIgnorePatterns)+len(globalIgnore)+len(c.IgnorePatterns))
+	patterns = append(patterns, config.DefaultIgnorePatterns...)
+	patterns = append(patterns, globalIgnore...)
+	patterns = append(patterns, c.IgnorePatterns...)
+
 	s := &Session{
-		Container:     c,
-		GlobalIgnore:  globalIgnore,
-		Events:        make(chan Event, 256),
-		pending:       make(map[string]PendingFile),
-		knownHash:     make(map[string][]byte),
-		hashCache:     make(map[string]hashCacheEntry),
-		ready:         make(chan struct{}),
-		stop:          make(chan struct{}),
-		pendingFile:   pendingFile,
-		hashCacheFile: hashCacheFile,
+		Container:      c,
+		GlobalIgnore:   globalIgnore,
+		Events:         make(chan Event, 256),
+		pending:        make(map[string]PendingFile),
+		knownHash:      make(map[string][]byte),
+		hashCache:      make(map[string]hashCacheEntry),
+		ready:          make(chan struct{}),
+		stop:           make(chan struct{}),
+		pendingFile:    pendingFile,
+		hashCacheFile:  hashCacheFile,
+		ignorePatterns: patterns,
 	}
 
 	s.baselineBuilding.Store(true)
@@ -103,6 +110,17 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 	}()
 
 	return s
+}
+
+func (s *Session) isIgnored(path string) bool {
+	name := filepath.Base(path)
+	for _, pattern := range s.ignorePatterns {
+		matched, err := filepath.Match(pattern, name)
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) loadHashCache() {
@@ -150,33 +168,7 @@ func (s *Session) buildBaselineHashes() {
 		go func() {
 			defer wg.Done()
 			for path := range pathsChan {
-				info, err := os.Stat(path)
-				if err != nil {
-					continue
-				}
-				mtime := info.ModTime().Unix()
-				size := info.Size()
-
-				s.mu.Lock()
-				entry, ok := s.hashCache[path]
-				s.mu.Unlock()
-
-				if ok && entry.Mtime == mtime && entry.Size == size {
-					s.mu.Lock()
-					s.knownHash[path] = entry.Hash
-					s.mu.Unlock()
-					continue
-				}
-
-				h, err := hashFile(path)
-				if err != nil {
-					continue
-				}
-
-				s.mu.Lock()
-				s.knownHash[path] = h
-				s.hashCache[path] = hashCacheEntry{Hash: h, Mtime: mtime, Size: size}
-				s.mu.Unlock()
+				s.updateHashForFile(path)
 			}
 		}()
 	}
@@ -192,6 +184,36 @@ func (s *Session) buildBaselineHashes() {
 	}
 	close(pathsChan)
 	wg.Wait()
+}
+
+func (s *Session) updateHashForFile(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	mtime := info.ModTime().Unix()
+	size := info.Size()
+
+	s.mu.Lock()
+	entry, ok := s.hashCache[path]
+	s.mu.Unlock()
+
+	if ok && entry.Mtime == mtime && entry.Size == size {
+		s.mu.Lock()
+		s.knownHash[path] = entry.Hash
+		s.mu.Unlock()
+		return
+	}
+
+	h, err := hashFile(path)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.knownHash[path] = h
+	s.hashCache[path] = hashCacheEntry{Hash: h, Mtime: mtime, Size: size}
+	s.mu.Unlock()
 }
 
 func (s *Session) loadPending() {
@@ -275,30 +297,7 @@ func hashFile(path string) ([]byte, error) {
 }
 
 func hashesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Session) isIgnored(path string) bool {
-	name := filepath.Base(path)
-	allPatterns := make([]string, 0, len(config.DefaultIgnorePatterns)+len(s.GlobalIgnore)+len(s.Container.IgnorePatterns))
-	allPatterns = append(allPatterns, config.DefaultIgnorePatterns...)
-	allPatterns = append(allPatterns, s.GlobalIgnore...)
-	allPatterns = append(allPatterns, s.Container.IgnorePatterns...)
-	for _, pattern := range allPatterns {
-		matched, err := filepath.Match(pattern, name)
-		if err == nil && matched {
-			return true
-		}
-	}
-	return false
+	return bytes.Equal(a, b)
 }
 
 func (s *Session) PendingCount() int {
@@ -337,55 +336,20 @@ func (s *Session) Flush() {
 	}
 	defer client.Close()
 
-	var failed []string
+	failed := make(map[string]struct{})
 	ok := 0
+
 	for _, pf := range snap {
-		remote, found := s.resolveRemotePath(pf.LocalPath)
-		if !found {
-			s.emit("error: could not resolve remote destination for "+filepath.Base(pf.LocalPath), true)
-			failed = append(failed, pf.LocalPath)
-			continue
-		}
-
-		var opErr error
-		var opMsg string
-		if pf.Kind == KindUpsert {
-			opErr = client.Upload(pf.LocalPath, remote)
-			opMsg = "↑ " + filepath.Base(pf.LocalPath)
+		if s.flushOne(client, pf) {
+			ok++
 		} else {
-			opErr = client.Delete(remote)
-			opMsg = "✕ " + filepath.Base(pf.LocalPath)
+			failed[pf.LocalPath] = struct{}{}
 		}
-
-		if opErr != nil {
-			s.emit("error "+filepath.Base(pf.LocalPath)+": "+opErr.Error(), true)
-			failed = append(failed, pf.LocalPath)
-			continue
-		}
-
-		if pf.Kind == KindUpsert {
-			if h, err := hashFile(pf.LocalPath); err == nil {
-				info, statErr := os.Stat(pf.LocalPath)
-				s.mu.Lock()
-				s.knownHash[pf.LocalPath] = h
-				if statErr == nil {
-					s.hashCache[pf.LocalPath] = hashCacheEntry{
-						Hash:  h,
-						Mtime: info.ModTime().Unix(),
-						Size:  info.Size(),
-					}
-				}
-				s.mu.Unlock()
-			}
-		}
-
-		s.emit(opMsg, false)
-		ok++
 	}
 
 	s.mu.Lock()
 	for _, pf := range snap {
-		if !contains(failed, pf.LocalPath) {
+		if _, didFail := failed[pf.LocalPath]; !didFail {
 			delete(s.pending, pf.LocalPath)
 		}
 	}
@@ -399,13 +363,52 @@ func (s *Session) Flush() {
 	s.saveHashCache()
 }
 
-func contains(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
+func (s *Session) flushOne(client *sftpclient.Client, pf PendingFile) bool {
+	remote, found := s.resolveRemotePath(pf.LocalPath)
+	if !found {
+		s.emit("error: could not resolve remote destination for "+filepath.Base(pf.LocalPath), true)
+		return false
+	}
+
+	var opErr error
+	var opMsg string
+	if pf.Kind == KindUpsert {
+		opErr = client.Upload(pf.LocalPath, remote)
+		opMsg = "↑ " + filepath.Base(pf.LocalPath)
+	} else {
+		opErr = client.Delete(remote)
+		opMsg = "✕ " + filepath.Base(pf.LocalPath)
+	}
+
+	if opErr != nil {
+		s.emit("error "+filepath.Base(pf.LocalPath)+": "+opErr.Error(), true)
+		return false
+	}
+
+	if pf.Kind == KindUpsert {
+		s.refreshLocalHash(pf.LocalPath)
+	}
+
+	s.emit(opMsg, false)
+	return true
+}
+
+func (s *Session) refreshLocalHash(path string) {
+	h, err := hashFile(path)
+	if err != nil {
+		return
+	}
+	info, statErr := os.Stat(path)
+	s.mu.Lock()
+	s.knownHash[path] = h
+	if statErr == nil {
+		s.hashCache[path] = hashCacheEntry{
+			Hash:  h,
+			Mtime: info.ModTime().Unix(),
+			Size:  info.Size(),
 		}
 	}
-	return false
+	s.mu.Unlock()
 }
 
 func (s *Session) Start() error {
@@ -580,13 +583,13 @@ func addDirsRecursive(w *fsnotify.Watcher, root string) (int, error) {
 	count := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return nil
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		if err := w.Add(path); err != nil {
-			return err
+		if addErr := w.Add(path); addErr != nil {
+			return nil
 		}
 		count++
 		return nil
@@ -605,6 +608,19 @@ type downloadJob struct {
 	folderBase string
 }
 
+type triageJob struct {
+	rf         sftpclient.RemoteFile
+	folderBase string
+	localHash  []byte
+}
+
+type triageResult struct {
+	job        triageJob
+	remoteHash []byte
+	needsDown  bool
+	err        error
+}
+
 func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 	s.pulling.Store(true)
 	defer s.pulling.Store(false)
@@ -617,12 +633,14 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 
 	result := &PullResult{}
 
-	type folderWork struct {
-		jobs      []downloadJob
-		remoteSet map[string]struct{}
-		localBase string
+	type folderListing struct {
+		remoteFiles []sftpclient.RemoteFile
+		remoteSet   map[string]struct{}
+		localBase   string
+		folderBase  string
 	}
-	var allFolders []folderWork
+
+	var listings []folderListing
 
 	for _, folder := range s.Container.Folders {
 		remotePath := filepath.ToSlash(filepath.Join(s.Container.SFTP.RemotePath, folder.Name))
@@ -631,108 +649,138 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			result.Errors = append(result.Errors, fmt.Sprintf("list remote %s: %v", remotePath, err))
 			continue
 		}
-
-		fw := folderWork{
-			remoteSet: make(map[string]struct{}, len(remoteFiles)),
-			localBase: folder.LocalPath,
-		}
-
+		remoteSet := make(map[string]struct{}, len(remoteFiles))
 		for _, rf := range remoteFiles {
-			fw.remoteSet[rf.LocalPath] = struct{}{}
-			if s.isIgnored(rf.LocalPath) {
-				continue
-			}
-
-			s.mu.Lock()
-			localHash := s.knownHash[rf.LocalPath]
-			s.mu.Unlock()
-
-			localInfo, statErr := os.Stat(rf.LocalPath)
-			if statErr != nil {
-				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
-				continue
-			}
-
-			if localInfo.Size() != rf.Size {
-				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
-				continue
-			}
-
-			if len(localHash) == 0 {
-				localHash, _ = hashFile(rf.LocalPath)
-				if localHash != nil {
-					info, statErr2 := os.Stat(rf.LocalPath)
-					s.mu.Lock()
-					s.knownHash[rf.LocalPath] = localHash
-					if statErr2 == nil {
-						s.hashCache[rf.LocalPath] = hashCacheEntry{
-							Hash:  localHash,
-							Mtime: info.ModTime().Unix(),
-							Size:  info.Size(),
-						}
-					}
-					s.mu.Unlock()
-				}
-			}
-
-			remoteHash, err := client.HashRemote(rf.RemotePath)
-			if err != nil {
-				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
-				continue
-			}
-
-			if !hashesEqual(localHash, remoteHash) {
-				rfWithHash := rf
-				rfWithHash.Hash = remoteHash
-				fw.jobs = append(fw.jobs, downloadJob{rf: rfWithHash, folderBase: folder.LocalPath})
-			}
+			remoteSet[rf.LocalPath] = struct{}{}
 		}
-
-		allFolders = append(allFolders, fw)
+		listings = append(listings, folderListing{
+			remoteFiles: remoteFiles,
+			remoteSet:   remoteSet,
+			localBase:   folder.LocalPath,
+			folderBase:  folder.LocalPath,
+		})
 	}
 
-	totalJobs := 0
-	for _, fw := range allFolders {
-		totalJobs += len(fw.jobs)
-	}
-
-	for _, fw := range allFolders {
-		_ = filepath.WalkDir(fw.localBase, func(path string, d fs.DirEntry, err error) error {
+	for _, l := range listings {
+		_ = filepath.WalkDir(l.localBase, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || s.isIgnored(path) {
 				return nil
 			}
-			if _, exists := fw.remoteSet[path]; !exists {
+			if _, exists := l.remoteSet[path]; !exists {
 				result.LocalOnly = append(result.LocalOnly, path)
 			}
 			return nil
 		})
 	}
 
-	if totalJobs == 0 {
+	var triageJobs []triageJob
+	var skipDown []sftpclient.RemoteFile
+
+	for _, l := range listings {
+		for _, rf := range l.remoteFiles {
+			if s.isIgnored(rf.LocalPath) {
+				continue
+			}
+			localInfo, statErr := os.Stat(rf.LocalPath)
+			if statErr != nil {
+				triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase})
+				continue
+			}
+			if localInfo.Size() != rf.Size {
+				triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase})
+				continue
+			}
+			s.mu.Lock()
+			localHash := s.knownHash[rf.LocalPath]
+			s.mu.Unlock()
+			if len(localHash) == 0 {
+				localHash, _ = hashFile(rf.LocalPath)
+				if localHash != nil {
+					s.storeLocalHash(rf.LocalPath, localHash)
+				}
+			}
+			triageJobs = append(triageJobs, triageJob{rf: rf, folderBase: l.folderBase, localHash: localHash})
+			_ = skipDown
+		}
+	}
+
+	numTriage := runtime.NumCPU()
+	if numTriage > 8 {
+		numTriage = 8
+	}
+
+	triageCh := make(chan triageJob, len(triageJobs))
+	triageResCh := make(chan triageResult, len(triageJobs))
+
+	for i := 0; i < numTriage; i++ {
+		go func() {
+			tClient, err := sftpclient.Connect(s.Container.SFTP)
+			if err != nil {
+				for job := range triageCh {
+					triageResCh <- triageResult{job: job, err: err}
+				}
+				return
+			}
+			defer tClient.Close()
+			for job := range triageCh {
+				if len(job.localHash) == 0 {
+					triageResCh <- triageResult{job: job, needsDown: true}
+					continue
+				}
+				rh, err := tClient.HashRemote(job.rf.RemotePath)
+				if err != nil {
+					triageResCh <- triageResult{job: job, needsDown: true, err: err}
+					continue
+				}
+				triageResCh <- triageResult{job: job, remoteHash: rh, needsDown: !hashesEqual(job.localHash, rh)}
+			}
+		}()
+	}
+
+	for _, tj := range triageJobs {
+		triageCh <- tj
+	}
+	close(triageCh)
+
+	var dlJobs []downloadJob
+	for range triageJobs {
+		tr := <-triageResCh
+		if tr.err != nil && tr.needsDown {
+			dlJobs = append(dlJobs, downloadJob{rf: tr.job.rf, folderBase: tr.job.folderBase})
+			continue
+		}
+		if tr.needsDown {
+			rf := tr.job.rf
+			rf.Hash = tr.remoteHash
+			dlJobs = append(dlJobs, downloadJob{rf: rf, folderBase: tr.job.folderBase})
+		}
+	}
+
+	if len(dlJobs) == 0 {
 		emit("✔ Already up to date — no files to download.", false)
 		return result, nil
 	}
 
-	numWorkers := runtime.NumCPU()
-	if numWorkers > 8 {
-		numWorkers = 8
+	numDL := runtime.NumCPU()
+	if numDL > 8 {
+		numDL = 8
 	}
 
-	type resultT struct {
+	type dlResult struct {
 		job downloadJob
 		h   []byte
 		err error
 	}
 
-	jobsCh := make(chan downloadJob, totalJobs)
-	resultsCh := make(chan resultT, totalJobs)
+	jobsCh := make(chan downloadJob, len(dlJobs))
+	resultsCh := make(chan dlResult, len(dlJobs))
 
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < numDL; i++ {
 		go func() {
 			wClient, err := sftpclient.Connect(s.Container.SFTP)
 			if err != nil {
 				for job := range jobsCh {
-					resultsCh <- resultT{job: job, err: err}
+					resultsCh <- dlResult{job: job, err: err}
 				}
 				return
 			}
@@ -740,23 +788,21 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			for job := range jobsCh {
 				dlErr := wClient.Download(job.rf.RemotePath, job.rf.LocalPath)
 				if dlErr != nil {
-					resultsCh <- resultT{job: job, err: dlErr}
+					resultsCh <- dlResult{job: job, err: dlErr}
 					continue
 				}
 				h, _ := hashFile(job.rf.LocalPath)
-				resultsCh <- resultT{job: job, h: h}
+				resultsCh <- dlResult{job: job, h: h}
 			}
 		}()
 	}
 
-	for _, fw := range allFolders {
-		for _, job := range fw.jobs {
-			jobsCh <- job
-		}
+	for _, job := range dlJobs {
+		jobsCh <- job
 	}
 	close(jobsCh)
 
-	for i := 0; i < totalJobs; i++ {
+	for range dlJobs {
 		r := <-resultsCh
 		if r.err != nil {
 			result.Errors = append(result.Errors, filepath.Base(r.job.rf.LocalPath)+": "+r.err.Error())
@@ -764,17 +810,7 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			continue
 		}
 		if r.h != nil {
-			info, statErr := os.Stat(r.job.rf.LocalPath)
-			s.mu.Lock()
-			s.knownHash[r.job.rf.LocalPath] = r.h
-			if statErr == nil {
-				s.hashCache[r.job.rf.LocalPath] = hashCacheEntry{
-					Hash:  r.h,
-					Mtime: info.ModTime().Unix(),
-					Size:  info.Size(),
-				}
-			}
-			s.mu.Unlock()
+			s.storeLocalHash(r.job.rf.LocalPath, r.h)
 		}
 		result.Downloaded = append(result.Downloaded, r.job.rf.LocalPath)
 		emit("↓ "+filepath.Base(r.job.rf.LocalPath), false)
@@ -786,4 +822,18 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 
 	s.saveHashCache()
 	return result, nil
+}
+
+func (s *Session) storeLocalHash(path string, h []byte) {
+	info, statErr := os.Stat(path)
+	s.mu.Lock()
+	s.knownHash[path] = h
+	if statErr == nil {
+		s.hashCache[path] = hashCacheEntry{
+			Hash:  h,
+			Mtime: info.ModTime().Unix(),
+			Size:  info.Size(),
+		}
+	}
+	s.mu.Unlock()
 }
