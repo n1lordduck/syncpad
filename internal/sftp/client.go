@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,7 @@ type RemoteFile struct {
 	LocalPath  string
 	ModTime    int64
 	Size       int64
+	Hash       []byte
 }
 
 func Connect(cfg config.SFTPConfig) (*Client, error) {
@@ -132,15 +134,46 @@ func (c *Client) ListRemote(remotePath, localBase string) ([]RemoteFile, error) 
 	return files, nil
 }
 
-func NeedsUpdate(localPath string, rf RemoteFile) bool {
+func (c *Client) HashRemote(remotePath string) ([]byte, error) {
+	f, err := c.sftp.Open(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
+}
+
+func NeedsUpdate(localPath string, rf RemoteFile, localHash []byte) bool {
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return true
 	}
+
 	if info.Size() != rf.Size {
 		return true
 	}
-	return info.ModTime().Unix() < rf.ModTime
+
+	if len(localHash) > 0 && len(rf.Hash) > 0 {
+		return !hashesEqual(localHash, rf.Hash)
+	}
+
+	return false
+}
+
+func hashesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) Download(remotePath, localPath string) error {

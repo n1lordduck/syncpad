@@ -58,7 +58,8 @@ type Session struct {
 	knownHash map[string][]byte
 	hashCache map[string]hashCacheEntry
 
-	pulling atomic.Bool
+	baselineBuilding atomic.Bool
+	pulling          atomic.Bool
 
 	ready chan struct{}
 
@@ -90,14 +91,14 @@ func NewSession(c *config.Container, globalIgnore []string) *Session {
 		hashCacheFile: hashCacheFile,
 	}
 
-	s.pulling.Store(true)
+	s.baselineBuilding.Store(true)
 	s.loadHashCache()
 	s.loadPending()
 
 	go func() {
 		s.buildBaselineHashes()
 		s.saveHashCache()
-		s.pulling.Store(false)
+		s.baselineBuilding.Store(false)
 		close(s.ready)
 	}()
 
@@ -415,7 +416,6 @@ func (s *Session) Start() error {
 	select {
 	case <-s.ready:
 	case <-s.stop:
-
 		return fmt.Errorf("session cancelled before start")
 	}
 
@@ -472,7 +472,7 @@ func (s *Session) handleEvent(w *fsnotify.Watcher, ev fsnotify.Event, debounce m
 	path := ev.Name
 	op := ev.Op
 
-	if s.pulling.Load() {
+	if s.baselineBuilding.Load() {
 		if op&fsnotify.Create != 0 {
 			if info, err := os.Stat(path); err == nil && info.IsDir() {
 				_, _ = addDirsRecursive(w, path)
@@ -636,16 +636,58 @@ func (s *Session) Pull(emit func(string, bool)) (*PullResult, error) {
 			remoteSet: make(map[string]struct{}, len(remoteFiles)),
 			localBase: folder.LocalPath,
 		}
+
 		for _, rf := range remoteFiles {
 			fw.remoteSet[rf.LocalPath] = struct{}{}
 			if s.isIgnored(rf.LocalPath) {
 				continue
 			}
-			if !sftpclient.NeedsUpdate(rf.LocalPath, rf) {
+
+			s.mu.Lock()
+			localHash := s.knownHash[rf.LocalPath]
+			s.mu.Unlock()
+
+			localInfo, statErr := os.Stat(rf.LocalPath)
+			if statErr != nil {
+				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
 				continue
 			}
-			fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
+
+			if localInfo.Size() != rf.Size {
+				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
+				continue
+			}
+
+			if len(localHash) == 0 {
+				localHash, _ = hashFile(rf.LocalPath)
+				if localHash != nil {
+					info, statErr2 := os.Stat(rf.LocalPath)
+					s.mu.Lock()
+					s.knownHash[rf.LocalPath] = localHash
+					if statErr2 == nil {
+						s.hashCache[rf.LocalPath] = hashCacheEntry{
+							Hash:  localHash,
+							Mtime: info.ModTime().Unix(),
+							Size:  info.Size(),
+						}
+					}
+					s.mu.Unlock()
+				}
+			}
+
+			remoteHash, err := client.HashRemote(rf.RemotePath)
+			if err != nil {
+				fw.jobs = append(fw.jobs, downloadJob{rf: rf, folderBase: folder.LocalPath})
+				continue
+			}
+
+			if !hashesEqual(localHash, remoteHash) {
+				rfWithHash := rf
+				rfWithHash.Hash = remoteHash
+				fw.jobs = append(fw.jobs, downloadJob{rf: rfWithHash, folderBase: folder.LocalPath})
+			}
 		}
+
 		allFolders = append(allFolders, fw)
 	}
 
