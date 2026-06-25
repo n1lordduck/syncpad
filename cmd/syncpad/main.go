@@ -54,15 +54,8 @@ func main() {
 	a := app.NewWithID("dev.n1lordduck.syncpad")
 	a.Settings().SetTheme(&forcedDarkTheme{Theme: theme.DefaultTheme()})
 
-	res, err := fyne.LoadResourceFromPath("assets/tray.png")
-	if err != nil {
-		res, _ = fyne.LoadResourceFromPath("../../assets/tray.png")
-	}
-	if res != nil {
-		a.SetIcon(res)
-	} else {
-		log.Println("WARNING: tray.png icon was not found! The system tray will not initialize.")
-	}
+	res := trayIconResource
+	a.SetIcon(res)
 
 	var mainWin fyne.Window
 	var syncApp *ui.App
@@ -83,9 +76,7 @@ func main() {
 			}),
 		)
 		desk.SetSystemTrayMenu(m)
-		if res != nil {
-			desk.SetSystemTrayIcon(res)
-		}
+		desk.SetSystemTrayIcon(res)
 	}
 
 	splash := showSplash(a)
